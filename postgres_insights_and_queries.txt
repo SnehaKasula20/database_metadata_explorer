@@ -1,0 +1,1544 @@
+================================================================================
+POSTGRESQL DATABASE INSIGHTS & SQL QUERIES REFERENCE (65 INSIGHTS)
+================================================================================
+
+IMPORTANT:
+- Queries are intended for PostgreSQL and use PostgreSQL system catalogs / information_schema.
+- Most database-object queries are scoped to the current database.
+- Replace the schema filter only if you intentionally want system schemas included.
+- PostgreSQL does not have direct equivalents for some Oracle concepts such as SGA/PGA,
+  tablespaces in the Oracle sense, ASM, Data Guard, and UNDO tablespaces. For those,
+  PostgreSQL-specific operational insights are provided instead.
+
+COMMON USER-SCHEMA FILTER:
+    n.nspname NOT IN ('pg_catalog','information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+
+
+--------------------------------------------------------------------------------
+INSIGHT #01: PostgreSQL version and environment
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_environment_info()
+Headers     : PostgreSQL Version, Server Version, Database, Server Address, Port, Current User
+Description : PostgreSQL server, database, connection and version information.
+
+SQL Query:
+SELECT
+    version() AS postgres_version,
+    current_setting('server_version') AS server_version,
+    current_database() AS database_name,
+    inet_server_addr() AS server_address,
+    inet_server_port() AS port,
+    current_user AS current_user;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #02: Database inventory
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_database_inventory()
+Headers     : Database Name, Owner, Size (MB), Size (GB)
+Description : Databases visible to the current PostgreSQL cluster with their sizes.
+
+SQL Query:
+SELECT
+    d.datname AS database_name,
+    pg_get_userbyid(d.datdba) AS owner,
+    ROUND((sz.raw_bytes / 1024.0 / 1024)::numeric, 2) AS size_mb,
+    ROUND((sz.raw_bytes / 1024.0 / 1024 / 1024)::numeric, 2) AS size_gb
+FROM pg_database d
+JOIN (
+    SELECT oid, pg_database_size(oid) AS raw_bytes
+    FROM pg_database
+    WHERE datallowconn = true
+      AND datistemplate = false
+) sz ON d.oid = sz.oid
+ORDER BY sz.raw_bytes DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #03: Schema/table storage analysis
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_schema_table_storage_analysis()
+Headers     : Schema, Table Name, Size (MB), Size (GB)
+Description : Table storage analysis (including indexes and TOAST).
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    ROUND((pg_total_relation_size(c.oid) / 1024.0 / 1024)::numeric, 2) AS size_mb,
+    ROUND((pg_total_relation_size(c.oid) / 1024.0 / 1024 / 1024)::numeric, 2) AS size_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY pg_total_relation_size(c.oid) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #04: Total table vs index storage
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_total_table_vs_index_storage()
+Headers     : Table Storage (MB), Index Storage (MB), Total Storage (MB), Table Storage (GB), Index Storage (GB), Total Storage (GB)
+Description : Database-wide table heap, index and total relation storage.
+
+SQL Query:
+SELECT
+    ROUND((COALESCE(SUM(pg_relation_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS table_mb,
+    ROUND((COALESCE(SUM(pg_indexes_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS index_mb,
+    ROUND((COALESCE(SUM(pg_total_relation_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS total_mb,
+    ROUND((COALESCE(SUM(pg_relation_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS table_gb,
+    ROUND((COALESCE(SUM(pg_indexes_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS index_gb,
+    ROUND((COALESCE(SUM(pg_total_relation_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS total_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%';
+
+
+--------------------------------------------------------------------------------
+INSIGHT #05: Top 100 tables
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_top_100_largest_relations()
+Headers     : Database, Schema, Table Name, Relation Type, Row Count, Size (MB), Size (GB)
+Description : Top 100 largest user tables/partitioned tables by row count.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS relation_name,
+    CASE c.relkind
+        WHEN 'r' THEN 'Table'
+        WHEN 'p' THEN 'Partitioned Table'
+        WHEN 'i' THEN 'Index'
+        WHEN 'm' THEN 'Materialized View'
+        WHEN 'v' THEN 'View'
+        ELSE c.relkind::text
+    END AS relation_type,
+    GREATEST(c.reltuples::bigint, 0) AS row_count,
+    ROUND((pg_total_relation_size(c.oid) / 1024.0 / 1024)::numeric, 2) AS size_mb,
+    ROUND((pg_total_relation_size(c.oid) / 1024.0 / 1024 / 1024)::numeric, 2) AS size_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY GREATEST(c.reltuples::bigint, 0) DESC, pg_total_relation_size(c.oid) DESC
+LIMIT 100;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #06: Tablespace usage
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tablespace_usage()
+Headers     : Tablespace Name, Owner, Location, Size (GB)
+Description : PostgreSQL tablespaces and the size of objects stored in each.
+
+SQL Query:
+WITH relation_sizes AS (
+    SELECT
+        c.oid,
+        c.reltablespace,
+        pg_total_relation_size(c.oid) AS total_size
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r','p','m')
+      AND n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+)
+SELECT
+    t.spcname AS tablespace_name,
+    pg_get_userbyid(t.spcowner) AS owner,
+    COALESCE(NULLIF(pg_tablespace_location(t.oid), ''), current_setting('data_directory')) AS location,
+    ROUND(COALESCE(SUM(rs.total_size), 0) / 1024.0 / 1024 / 1024, 2) AS size_gb
+FROM pg_tablespace t
+LEFT JOIN relation_sizes rs
+  ON rs.reltablespace = t.oid
+  OR (rs.reltablespace = 0 AND t.oid = (
+      SELECT dattablespace
+      FROM pg_database
+      WHERE datname = current_database()
+  ))
+GROUP BY t.oid, t.spcname, t.spcowner
+ORDER BY size_gb DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #07: Tablespace object storage
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tablespace_object_storage()
+Headers     : Tablespace Name, Object Count, Total Object Size (GB)
+Description : Object storage assigned to each PostgreSQL tablespace, including objects
+              that inherit the current database's default tablespace.
+
+SQL Query:
+WITH relation_sizes AS (
+    SELECT
+        c.oid,
+        CASE
+            WHEN c.reltablespace = 0 THEN d.dattablespace
+            ELSE c.reltablespace
+        END AS tablespace_oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN (
+        SELECT dattablespace
+        FROM pg_database
+        WHERE datname = current_database()
+    ) d
+    WHERE c.relkind IN ('r','p','i','I','m')
+      AND n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+)
+SELECT
+    t.spcname AS tablespace_name,
+    COUNT(rs.oid) AS object_count,
+    ROUND(
+        COALESCE(SUM(pg_total_relation_size(rs.oid)), 0)
+        / 1024.0 / 1024 / 1024,
+        2
+    ) AS total_size_gb
+FROM pg_tablespace t
+LEFT JOIN relation_sizes rs
+  ON rs.tablespace_oid = t.oid
+GROUP BY t.oid, t.spcname
+ORDER BY total_size_gb DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #08: Database files / physical layout
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_database_files()
+Headers     : Database File / Tablespace, Location
+Description : PostgreSQL exposes data directories and tablespace locations rather than
+              Oracle-style DBA_DATA_FILES.
+
+SQL Query:
+SELECT
+    spcname AS tablespace_name,
+    COALESCE(
+        NULLIF(pg_tablespace_location(oid), ''),
+        current_setting('data_directory')
+    ) AS location
+FROM pg_tablespace
+ORDER BY spcname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #09: Master (Parent) tables
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_master_tables()
+Headers     : Schema, Parent Table, Child FK Count, Referencing Child Tables
+Description : Tables referenced by foreign-key constraints.
+
+SQL Query:
+SELECT
+    parent_ns.nspname AS schema_name,
+    parent.relname AS table_name,
+    COUNT(*) AS child_fk_count,
+    STRING_AGG(DISTINCT child_ns.nspname || '.' || child.relname, ', '
+               ORDER BY child_ns.nspname || '.' || child.relname) AS child_tables
+FROM pg_constraint con
+JOIN pg_class parent ON parent.oid = con.confrelid
+JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+JOIN pg_class child ON child.oid = con.conrelid
+JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+WHERE con.contype = 'f'
+  AND parent_ns.nspname NOT IN ('pg_catalog','information_schema')
+GROUP BY parent_ns.nspname, parent.relname
+ORDER BY child_fk_count DESC, schema_name, table_name;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #10: Child tables
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_child_tables()
+Headers     : Schema, Child Table, Parent FK Count, Referenced Parent Tables
+Description : Tables containing foreign keys referencing parent tables.
+
+SQL Query:
+SELECT
+    child_ns.nspname AS schema_name,
+    child.relname AS table_name,
+    COUNT(*) AS parent_fk_count,
+    STRING_AGG(DISTINCT parent_ns.nspname || '.' || parent.relname, ', '
+               ORDER BY parent_ns.nspname || '.' || parent.relname) AS parent_tables
+FROM pg_constraint con
+JOIN pg_class child ON child.oid = con.conrelid
+JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+JOIN pg_class parent ON parent.oid = con.confrelid
+JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+WHERE con.contype = 'f'
+  AND child_ns.nspname NOT IN ('pg_catalog','information_schema')
+GROUP BY child_ns.nspname, child.relname
+ORDER BY parent_fk_count DESC, schema_name, table_name;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #11: Independent tables
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_independent_tables()
+Headers     : Schema, Table Name
+Description : Tables with no incoming or outgoing foreign-key relationships.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint fk
+      WHERE fk.conrelid = c.oid AND fk.contype = 'f'
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint fk
+      WHERE fk.confrelid = c.oid AND fk.contype = 'f'
+  )
+ORDER BY n.nspname, c.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #12: Large unpartitioned tables
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_large_unpartitioned_tables()
+Headers     : Schema, Table Name, Size (MB), Size (GB)
+Description : Large tables that are not partitioned, for partitioning review.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    ROUND(pg_total_relation_size(c.oid) / 1024.0 / 1024, 2) AS size_mb,
+    ROUND(pg_total_relation_size(c.oid) / 1024.0 / 1024 / 1024, 2) AS size_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_inherits i
+      WHERE i.inhrelid = c.oid
+  )
+ORDER BY pg_total_relation_size(c.oid) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #13: Partition inventory
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_partition_inventory()
+Headers     : Schema, Parent Table, Partition Count
+Description : Partitioned tables and their child partition counts.
+
+SQL Query:
+SELECT
+    parent_ns.nspname AS schema_name,
+    parent.relname AS table_name,
+    COUNT(*) AS partition_count
+FROM pg_inherits i
+JOIN pg_class parent ON parent.oid = i.inhparent
+JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+WHERE parent_ns.nspname NOT IN ('pg_catalog','information_schema')
+GROUP BY parent_ns.nspname, parent.relname
+ORDER BY partition_count DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #14: Detailed partition information
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_detailed_partition_info()
+Headers     : Schema, Parent Table, Partition Name, Partition Bound
+Description : Partition hierarchy and partition bounds.
+
+SQL Query:
+SELECT
+    parent_ns.nspname AS schema_name,
+    parent.relname AS parent_table,
+    child.relname AS partition_name,
+    pg_get_expr(child.relpartbound, child.oid) AS partition_bound
+FROM pg_inherits i
+JOIN pg_class parent ON parent.oid = i.inhparent
+JOIN pg_class child ON child.oid = i.inhrelid
+JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+WHERE parent_ns.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY parent_ns.nspname, parent.relname, child.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #15: Large object columns
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_large_object_columns()
+Headers     : Schema, Table Name, Column Name, Data Type
+Description : Columns using PostgreSQL large-value types such as bytea, text and XML.
+
+SQL Query:
+SELECT
+    table_schema AS schema_name,
+    table_name,
+    column_name,
+    data_type
+FROM information_schema.columns
+WHERE table_schema NOT IN ('pg_catalog','information_schema')
+  AND data_type IN ('bytea','text','xml')
+ORDER BY table_schema, table_name, ordinal_position;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #16: JSON / JSONB columns
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_json_columns()
+Headers     : Schema, Table Name, Column Name, Data Type
+Description : Columns explicitly defined with PostgreSQL json or jsonb data types.
+
+SQL Query:
+SELECT
+    table_schema AS schema_name,
+    table_name,
+    column_name,
+    data_type
+FROM information_schema.columns
+WHERE table_schema NOT IN ('pg_catalog','information_schema')
+  AND data_type IN ('json','jsonb')
+ORDER BY table_schema, table_name, ordinal_position;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #17: Primary keys
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_primary_keys()
+Headers     : Schema, Table Name, Constraint Name, Definition
+Description : Primary-key constraints and their definitions.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    con.conname AS constraint_name,
+    pg_get_constraintdef(con.oid) AS definition
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'p'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY n.nspname, c.relname, con.conname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #18: Tables without primary keys
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tables_without_primary_keys()
+Headers     : Schema, Table Name
+Description : User tables without an explicit primary-key constraint.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint con
+      WHERE con.conrelid = c.oid
+        AND con.contype = 'p'
+  )
+ORDER BY n.nspname, c.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #19: All indexes
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_all_indexes()
+Headers     : Schema, Table Name, Index Name, Index Scans, Size (MB), Size (GB)
+Description : PostgreSQL index inventory and status.
+
+SQL Query:
+SELECT
+    schemaname AS schema_name,
+    tablename AS table_name,
+    indexrelname AS index_name,
+    idx_scan,
+    ROUND((pg_relation_size(indexrelid) / 1024.0 / 1024)::numeric, 2) AS size_mb,
+    ROUND((pg_relation_size(indexrelid) / 1024.0 / 1024 / 1024)::numeric, 2) AS size_gb
+FROM pg_stat_all_indexes
+WHERE schemaname NOT IN ('pg_catalog','information_schema')
+  AND schemaname NOT LIKE 'pg_toast%'
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #20: Index columns
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_index_columns()
+Headers     : Schema, Table Name, Index Name, Column Position, Column Name
+Description : Columns and positions used by each index.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    t.relname AS table_name,
+    i.relname AS index_name,
+    k.n AS column_position,
+    a.attname AS column_name
+FROM pg_index ix
+JOIN pg_class t ON t.oid = ix.indrelid
+JOIN pg_class i ON i.oid = ix.indexrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+CROSS JOIN LATERAL generate_subscripts(ix.indkey, 1) AS k(n)
+JOIN pg_attribute a
+  ON a.attrelid = t.oid
+ AND a.attnum = ix.indkey[k.n]
+WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY n.nspname, t.relname, i.relname, k.n;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #21: Index count by table
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_index_count_by_table()
+Headers     : Schema, Table Name, Index Count
+Description : Number of indexes defined on each user table.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    COUNT(i.indexrelid) AS index_count
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_index i ON i.indrelid = c.oid
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+GROUP BY n.nspname, c.relname
+HAVING COUNT(i.indexrelid) > 0
+ORDER BY index_count DESC, n.nspname, c.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #22: Largest indexes
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_largest_indexes()
+Headers     : Schema, Table Name, Index Name, Size (MB), Size (GB)
+Description : Largest user indexes by physical size.
+
+SQL Query:
+SELECT
+    schemaname AS schema_name,
+    tablename AS table_name,
+    indexrelname AS index_name,
+    ROUND(pg_relation_size(indexrelid) / 1024.0 / 1024, 2) AS size_mb,
+    ROUND(pg_relation_size(indexrelid) / 1024.0 / 1024 / 1024, 2) AS size_gb
+FROM pg_stat_all_indexes
+WHERE schemaname NOT IN ('pg_catalog','information_schema')
+ORDER BY pg_relation_size(indexrelid) DESC
+LIMIT 100;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #23: Foreign keys / relationships
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_foreign_keys()
+Headers     : Schema, Table Name, Constraint Name, Definition
+Description : Foreign-key relationship inventory.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    con.conname AS constraint_name,
+    pg_get_constraintdef(con.oid) AS definition
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'f'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY n.nspname, c.relname, con.conname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #24: Tables with many foreign-key relationships
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tables_many_foreign_keys()
+Headers     : Schema, Table Name, Foreign Key Count
+Description : Tables ranked by number of outgoing foreign-key constraints.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    COUNT(*) AS foreign_key_count
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'f'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+GROUP BY n.nspname, c.relname
+ORDER BY foreign_key_count DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #25: Unique constraints
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_unique_constraints()
+Headers     : Schema, Table Name, Constraint Name, Definition
+Description : Unique constraints inventory.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    con.conname AS constraint_name,
+    pg_get_constraintdef(con.oid, true) AS definition
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'u'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY n.nspname, c.relname, con.conname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #26: Duplicate/redundant index candidates
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_duplicate_index_candidates()
+Headers     : Schema, Table Name, Index A, Index B, Definition
+Description : Candidate duplicate indexes with the same normalized CREATE INDEX
+              definition after removing the index name. Review uniqueness, predicates,
+              expressions, included columns and workload before removing any index.
+
+SQL Query:
+WITH idx AS (
+    SELECT
+        n.nspname AS schema_name,
+        t.relname AS table_name,
+        i.relname AS index_name,
+        regexp_replace(
+            pg_get_indexdef(ix.indexrelid),
+            '^CREATE (UNIQUE )?INDEX [^ ]+ ON ',
+            'CREATE INDEX ON '
+        ) AS normalized_definition
+    FROM pg_index ix
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+)
+SELECT
+    a.schema_name,
+    a.table_name,
+    a.index_name AS index_a,
+    b.index_name AS index_b,
+    a.normalized_definition AS definition
+FROM idx a
+JOIN idx b
+  ON b.schema_name = a.schema_name
+ AND b.table_name = a.table_name
+ AND b.normalized_definition = a.normalized_definition
+ AND b.index_name > a.index_name
+ORDER BY a.schema_name, a.table_name, a.index_name, b.index_name;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #27: Character sets and collations
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_character_sets_and_collations()
+Headers     : Database Name, Database Encoding, Server Encoding, LC_COLLATE, LC_CTYPE
+Description : Current database encoding and locale configuration.
+
+SQL Query:
+SELECT
+    current_database() AS database_name,
+    pg_encoding_to_char(encoding) AS database_encoding,
+    current_setting('server_encoding') AS server_encoding,
+    datcollate AS lc_collate,
+    datctype AS lc_ctype
+FROM pg_database
+WHERE datname = current_database();
+
+
+--------------------------------------------------------------------------------
+INSIGHT #28: Tables with comments / documentation
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_table_comments()
+Headers     : Schema, Table Name, Comments
+Description : Table comments stored in PostgreSQL catalog.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    obj_description(c.oid, 'pg_class') AS comments
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','v','m')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND obj_description(c.oid, 'pg_class') IS NOT NULL
+ORDER BY n.nspname, c.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #29: Stored procedures
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_stored_procedures()
+Headers     : Schema, Procedure Name, Language, Owner, Definition
+Description : Procedures created with CREATE PROCEDURE.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    p.proname AS procedure_name,
+    l.lanname AS language,
+    pg_get_userbyid(p.proowner) AS owner,
+    pg_get_functiondef(p.oid) AS definition
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+JOIN pg_language l ON l.oid = p.prolang
+WHERE p.prokind = 'p'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend dep
+      WHERE dep.classid = 'pg_proc'::regclass
+        AND dep.objid = p.oid
+        AND dep.deptype = 'e'
+  )
+ORDER BY n.nspname, p.proname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #30: Functions
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_functions()
+Headers     : Schema, Function Name, Return Type, Language, Volatility
+Description : PostgreSQL functions inventory.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    p.proname AS function_name,
+    pg_get_function_result(p.oid) AS return_type,
+    l.lanname AS language,
+    p.provolatile AS volatility,
+    p.proparallel AS parallel_safety
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+JOIN pg_language l ON l.oid = p.prolang
+WHERE p.prokind = 'f'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend dep
+      WHERE dep.classid = 'pg_proc'::regclass
+        AND dep.objid = p.oid
+        AND dep.deptype = 'e'
+  )
+ORDER BY n.nspname, p.proname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #31: Views
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_views()
+Headers     : Schema, View Name, Definition
+Description : Regular and materialized view inventory.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS view_name,
+    pg_get_viewdef(c.oid) AS definition,
+    CASE c.relkind
+        WHEN 'v' THEN 'VIEW'
+        WHEN 'm' THEN 'MATERIALIZED VIEW'
+    END AS object_type
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v', 'm')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend dep
+      WHERE dep.classid = 'pg_class'::regclass
+        AND dep.objid = c.oid
+        AND dep.deptype = 'e'
+  )
+ORDER BY n.nspname, c.relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #32: Triggers
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_triggers()
+Headers     : Schema, Table Name, Trigger Name, Definition
+Description : Table trigger inventory.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    t.tgname AS trigger_name,
+    pg_get_triggerdef(t.oid, true) AS definition
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE NOT t.tgisinternal
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY n.nspname, c.relname, t.tgname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #33: Scheduled jobs
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_scheduled_jobs()
+Headers     : Job Name, Schedule, Active, Database
+Description : PostgreSQL itself does not provide a universal built-in scheduler equivalent
+              to Oracle DBMS_SCHEDULER. pg_cron, if installed, can be inspected separately.
+
+SQL Query (when pg_cron is installed):
+SELECT
+    jobid,
+    schedule,
+    active,
+    command,
+    database,
+    username
+FROM cron.job
+ORDER BY jobid;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #34: Users and roles
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_users_and_roles()
+Headers     : Role Name, Superuser, Create DB, Create Role, Login, Connection Limit
+Description : PostgreSQL role/account configuration.
+
+SQL Query:
+SELECT
+    rolname AS role_name,
+    rolsuper AS is_superuser,
+    rolcreatedb AS can_create_database,
+    rolcreaterole AS can_create_role,
+    rolcanlogin AS can_login,
+    rolreplication AS replication_role,
+    rolconnlimit AS connection_limit,
+    rolvaliduntil AS valid_until
+FROM pg_roles
+WHERE rolname NOT LIKE 'pg_%'
+ORDER BY rolname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #35: Tablespace status and configuration
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tablespace_status()
+Headers     : Tablespace Name, Owner, Location
+Description : PostgreSQL tablespace definitions and physical locations.
+
+SQL Query:
+SELECT
+    spcname AS tablespace_name,
+    pg_get_userbyid(spcowner) AS owner,
+    COALESCE(
+        NULLIF(pg_tablespace_location(oid), ''),
+        current_setting('data_directory')
+    ) AS location
+FROM pg_tablespace
+ORDER BY spcname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #36: Shared memory / memory configuration
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_memory_configuration()
+Headers     : Parameter, Setting, Unit
+Description : PostgreSQL memory-related configuration such as shared_buffers and work_mem.
+
+SQL Query:
+SELECT
+    name AS parameter,
+    setting,
+    unit
+FROM pg_settings
+WHERE name IN (
+    'shared_buffers',
+    'work_mem',
+    'maintenance_work_mem',
+    'effective_cache_size',
+    'temp_buffers',
+    'wal_buffers',
+    'huge_pages'
+)
+ORDER BY name;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #37: Memory and cache statistics
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_memory_cache_statistics()
+Headers     : Metric, Value
+Description : PostgreSQL cache-hit and backend activity statistics.
+              PostgreSQL does not expose Oracle-style PGA statistics.
+
+SQL Query:
+SELECT
+    'blks_hit' AS metric,
+    SUM(blks_hit)::numeric AS value
+FROM pg_stat_database
+UNION ALL
+SELECT
+    'blks_read',
+    SUM(blks_read)::numeric
+FROM pg_stat_database
+UNION ALL
+SELECT
+    'temp_bytes',
+    SUM(temp_bytes)::numeric
+FROM pg_stat_database;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #38: Temporary file usage
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_temp_file_usage()
+Headers     : Database, Temp Files, Size (MB), Size (GB), Pretty Size
+Description : Temporary-file generation by database (filters out 0 temp usage).
+
+SQL Query:
+SELECT
+    datname AS database_name,
+    temp_files,
+    ROUND((temp_bytes / 1024.0 / 1024)::numeric, 2) AS size_mb,
+    ROUND((temp_bytes / 1024.0 / 1024 / 1024)::numeric, 2) AS size_gb,
+    pg_size_pretty(temp_bytes) AS temp_bytes
+FROM pg_stat_database
+WHERE datname IS NOT NULL
+  AND (temp_files > 0 OR temp_bytes > 0)
+ORDER BY pg_stat_database.temp_bytes DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #39: Sessions and connections
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_sessions_and_connections()
+Headers     : State, Session Count
+Description : Current PostgreSQL backend sessions grouped by state.
+
+SQL Query:
+SELECT
+    COALESCE(state, 'unknown') AS state,
+    COUNT(*) AS session_count
+FROM pg_stat_activity
+GROUP BY state
+ORDER BY session_count DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #40: Long-running sessions / queries
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_long_running_sessions()
+Headers     : PID, User, Database, State, Duration, Query
+Description : Active sessions whose current query has been running for at least
+              five minutes.
+
+SQL Query:
+SELECT
+    pid,
+    usename AS username,
+    datname AS database_name,
+    state,
+    clock_timestamp() - query_start AS duration,
+    wait_event_type,
+    wait_event,
+    LEFT(query, 200) AS query_sample
+FROM pg_stat_activity
+WHERE state = 'active'
+  AND query_start IS NOT NULL
+  AND clock_timestamp() - query_start >= INTERVAL '5 minutes'
+ORDER BY query_start ASC
+LIMIT 100;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #41: Locks
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_locks()
+Headers     : PID, Lock Type, Mode, Granted, Relation, Transaction ID, Lock Category, Fast Path, User, Database
+Description : Current locks held or awaited by PostgreSQL sessions, displaying default VirtualXID locks, system catalog relation locks, fastpath locks, and user table/transaction locks.
+
+SQL Query:
+SELECT
+    l.pid,
+    l.locktype,
+    l.mode,
+    l.granted::text AS granted,
+    COALESCE(l.relation::regclass::text, 'N/A') AS relation,
+    COALESCE(l.transactionid::text, 'N/A') AS transaction_id,
+    CASE
+        WHEN l.locktype = 'virtualxid' THEN 'VirtualXID (Default Session Lock)'
+        WHEN l.locktype = 'transactionid' THEN 'TransactionID (Row/Txn Lock)'
+        WHEN l.locktype = 'relation' AND n.nspname IN ('pg_catalog', 'information_schema') THEN 'System Relation (Catalog Lock)'
+        WHEN l.locktype = 'relation' THEN 'User Relation (' || COALESCE(l.relation::regclass::text, 'OID ' || l.relation::text) || ')'
+        ELSE INITCAP(l.locktype)
+    END AS lock_category,
+    l.fastpath::text AS fastpath,
+    a.usename AS username,
+    a.datname AS database_name
+FROM pg_locks l
+LEFT JOIN pg_class c ON c.oid = l.relation
+LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+ORDER BY l.granted, l.pid, l.locktype;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #42: Blocking sessions
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_blocking_sessions()
+Headers     : Blocked PID, Blocking PID, Blocked Query, Blocking Query
+Description : Sessions waiting for locks held by other sessions.
+
+SQL Query:
+SELECT
+    blocked.pid AS blocked_pid,
+    blocking.pid AS blocking_pid,
+    blocked.usename AS blocked_user,
+    blocking.usename AS blocking_user,
+    clock_timestamp() - blocked.query_start AS blocked_duration,
+    LEFT(blocked.query, 200) AS blocked_query,
+    LEFT(blocking.query, 200) AS blocking_query
+FROM pg_stat_activity blocked
+CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS bp(blocking_pid)
+JOIN pg_stat_activity blocking ON blocking.pid = bp.blocking_pid
+ORDER BY blocked_duration DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #43: Slow / resource-intensive SQL
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_slow_sql()
+Headers     : Query ID, Calls, Total Time, Mean Time, Rows, Query
+Description : Top SQL statements by cumulative execution time.
+              Requires pg_stat_statements.
+
+SQL Query (when pg_stat_statements is enabled):
+SELECT
+    queryid,
+    calls,
+    ROUND(total_exec_time / 1000.0, 2) AS total_seconds,
+    ROUND(mean_exec_time, 2) AS mean_ms,
+    rows,
+    LEFT(query, 200) AS query_sample
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 50;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #44: SQL examining / reading large amounts of data
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_large_data_examination_sql()
+Headers     : Query ID, Calls, Shared Blocks Read, Temp Blocks Read, Rows, Query
+Description : SQL statements responsible for high block-read activity.
+              Requires pg_stat_statements.
+
+SQL Query:
+SELECT
+    queryid,
+    calls,
+    shared_blks_read,
+    temp_blks_read,
+    rows,
+    LEFT(query, 200) AS query_sample
+FROM pg_stat_statements
+ORDER BY shared_blks_read DESC
+LIMIT 50;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #45: Most frequently executed SQL
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_frequently_executed_sql()
+Headers     : Query ID, Calls, Total Time, Query
+Description : SQL statements ranked by execution count.
+              Requires pg_stat_statements.
+
+SQL Query:
+SELECT
+    queryid,
+    calls,
+    ROUND(total_exec_time / 1000.0, 2) AS total_seconds,
+    LEFT(query, 200) AS query_sample
+FROM pg_stat_statements
+ORDER BY calls DESC
+LIMIT 50;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #46: Top wait events
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_top_wait_events()
+Headers     : Wait Event Type, Wait Event, Active Sessions
+Description : Current sessions waiting on PostgreSQL wait events.
+
+SQL Query:
+SELECT
+    wait_event_type,
+    wait_event,
+    COUNT(*) AS active_sessions
+FROM pg_stat_activity
+WHERE wait_event IS NOT NULL
+GROUP BY wait_event_type, wait_event
+ORDER BY active_sessions DESC, wait_event_type, wait_event;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #47: Database workload / activity profile
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_database_activity_profile()
+Headers     : Database, Transactions, Blocks Read, Blocks Hit, Tuples Returned, Temp Bytes
+Description : High-level workload and I/O activity by database.
+
+SQL Query:
+SELECT
+    datname AS database_name,
+    xact_commit,
+    xact_rollback,
+    blks_read,
+    blks_hit,
+    tup_returned,
+    tup_fetched,
+    tup_inserted,
+    tup_updated,
+    tup_deleted,
+    temp_bytes
+FROM pg_stat_database
+ORDER BY (xact_commit + xact_rollback) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #48: Replication / database role
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_replication_status()
+Headers     : In Recovery, Primary/Standby State, WAL LSN, Replication Sessions
+Description : PostgreSQL recovery and replication state.
+
+SQL Query:
+SELECT
+    pg_is_in_recovery() AS is_in_recovery,
+    CASE
+        WHEN pg_is_in_recovery() THEN 'STANDBY/RECOVERY'
+        ELSE 'PRIMARY'
+    END AS database_role,
+    CASE
+        WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()
+        ELSE pg_current_wal_lsn()
+    END AS current_or_replay_wal_lsn,
+    CASE
+        WHEN pg_is_in_recovery() THEN NULL
+        ELSE (SELECT COUNT(*) FROM pg_stat_replication)
+    END AS replication_sessions;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #49: WAL / archive configuration
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_wal_archive_configuration()
+Headers     : Parameter, Setting
+Description : WAL and archive-related configuration.
+
+SQL Query:
+SELECT
+    name,
+    setting,
+    unit
+FROM pg_settings
+WHERE name IN (
+    'wal_level',
+    'archive_mode',
+    'archive_command',
+    'archive_timeout',
+    'max_wal_size',
+    'min_wal_size'
+)
+ORDER BY name;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #50: WAL generation
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_wal_generation()
+Headers     : WAL Records, WAL Full Page Images, WAL Bytes, WAL FPI
+Description : Cumulative WAL generation statistics.
+
+SQL Query (PostgreSQL versions exposing pg_stat_wal):
+SELECT
+    wal_records,
+    wal_fpi,
+    wal_bytes,
+    wal_buffers_full,
+    wal_write,
+    wal_sync
+FROM pg_stat_wal;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #51: WAL / checkpoint activity
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_wal_checkpoint_activity()
+Headers     : Checkpoints, Write Time, Sync Time, Buffers Written
+Description : Checkpoint activity from pg_stat_checkpointer. This catalog view is
+              available in PostgreSQL 17 and later.
+
+SQL Query:
+SELECT
+    num_timed AS checkpoints_timed,
+    num_requested AS checkpoints_req,
+    write_time AS checkpoint_write_time,
+    sync_time AS checkpoint_sync_time,
+    buffers_written AS buffers_checkpoint
+FROM pg_stat_checkpointer;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #52: Transaction ID / vacuum health
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_transaction_vacuum_health()
+Headers     : Database, Age(relfrozenxid), Oldest XID Age
+Description : Transaction-ID age and vacuum-related risk indicators.
+              PostgreSQL uses VACUUM and transaction-ID freezing rather than an Oracle UNDO tablespace.
+
+SQL Query:
+SELECT
+    datname AS database_name,
+    age(datfrozenxid) AS frozen_xid_age
+FROM pg_database
+ORDER BY age(datfrozenxid) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #53: PostgreSQL data directory / physical layout
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_physical_layout()
+Headers     : Data Directory, Config File, HBA File, Ident File
+Description : Important PostgreSQL physical and configuration file locations.
+
+SQL Query:
+SELECT
+    current_setting('data_directory') AS data_directory,
+    current_setting('config_file') AS config_file,
+    current_setting('hba_file') AS hba_file,
+    current_setting('ident_file') AS ident_file;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #54: Tablespace locations
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_storage_capacity()
+Headers     : Tablespace Name, Location
+Description : PostgreSQL tablespace locations. This query does not provide filesystem
+              total, used or free capacity; OS-level filesystem monitoring is required
+              for those metrics.
+
+SQL Query:
+SELECT
+    spcname AS tablespace_name,
+    COALESCE(
+        NULLIF(pg_tablespace_location(oid), ''),
+        current_setting('data_directory')
+    ) AS location
+FROM pg_tablespace
+ORDER BY spcname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #55: Database object storage summary
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_database_storage_summary()
+Headers     : Database, Relation Count, Table Size (MB), Index Size (MB), Total Size (MB), Table Size (GB), Index Size (GB), Total Size (GB)
+Description : Current database storage summary for user tables and indexes.
+
+SQL Query:
+SELECT
+    current_database() AS database_name,
+    COUNT(*) AS relation_count,
+    ROUND((COALESCE(SUM(pg_relation_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS table_mb,
+    ROUND((COALESCE(SUM(pg_indexes_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS index_mb,
+    ROUND((COALESCE(SUM(pg_total_relation_size(c.oid)), 0) / 1024.0 / 1024)::numeric, 2) AS total_mb,
+    ROUND((COALESCE(SUM(pg_relation_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS table_gb,
+    ROUND((COALESCE(SUM(pg_indexes_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS index_gb,
+    ROUND((COALESCE(SUM(pg_total_relation_size(c.oid)), 0) / 1024.0 / 1024 / 1024)::numeric, 2) AS total_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%';
+
+
+--------------------------------------------------------------------------------
+INSIGHT #56: Identify archival candidates
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_archival_candidates()
+Headers     : Schema, Table Name, Estimated Rows, Last Analyze, Last Autoanalyze, Table Size
+Description : Candidate tables for archival review based primarily on estimated row
+              count and physical size. Statistics timestamps are provided for review;
+              business retention rules are required to confirm archival eligibility.
+
+SQL Query:
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    c.reltuples AS estimated_rows,
+    st.last_analyze,
+    st.last_autoanalyze,
+    ROUND(
+        pg_total_relation_size(c.oid) / 1024.0 / 1024 / 1024,
+        2
+    ) AS total_size_gb
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_stat_all_tables st ON st.relid = c.oid
+WHERE c.relkind IN ('r','p')
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND c.reltuples > 10000
+ORDER BY pg_total_relation_size(c.oid) DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #57: Identify tables with limited usage
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_tables_with_limited_usage()
+Headers     : Schema, Table Name, Sequential Scans, Index Scans, Rows Fetched
+Description : Tables with low observed access activity since statistics reset.
+
+SQL Query:
+SELECT
+    schemaname AS schema_name,
+    relname AS table_name,
+    seq_scan,
+    idx_scan,
+    COALESCE(seq_scan,0) + COALESCE(idx_scan,0) AS total_scans,
+    seq_tup_read,
+    idx_tup_fetch
+FROM pg_stat_user_tables
+ORDER BY total_scans ASC, schemaname, relname;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #58: Identify hot tables / objects
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_hot_tables()
+Headers     : Schema, Table Name, Sequential Scans, Index Scans, Inserts, Updates, Deletes
+Description : Tables with high observed read/write activity.
+
+SQL Query:
+SELECT
+    schemaname AS schema_name,
+    relname AS table_name,
+    seq_scan,
+    idx_scan,
+    n_tup_ins AS inserts,
+    n_tup_upd AS updates,
+    n_tup_del AS deletes,
+    (COALESCE(seq_scan,0) + COALESCE(idx_scan,0)) AS total_scans
+FROM pg_stat_user_tables
+WHERE (
+    COALESCE(seq_scan,0) +
+    COALESCE(idx_scan,0) +
+    COALESCE(n_tup_ins,0) +
+    COALESCE(n_tup_upd,0) +
+    COALESCE(n_tup_del,0)
+) > 0
+ORDER BY (
+    COALESCE(seq_scan,0) +
+    COALESCE(idx_scan,0) +
+    COALESCE(n_tup_ins,0) +
+    COALESCE(n_tup_upd,0) +
+    COALESCE(n_tup_del,0)
+) DESC
+LIMIT 100;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #59: Table bloat / vacuum candidates
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_table_bloat_candidates()
+Headers     : Schema, Table Name, Dead Tuples, Live Tuples, Last Vacuum, Last Autovacuum
+Description : Tables with dead tuples and potentially overdue vacuum activity.
+              This is a practical candidate list, not an exact bloat percentage.
+
+SQL Query:
+SELECT
+    schemaname AS schema_name,
+    relname AS table_name,
+    n_live_tup AS live_tuples,
+    n_dead_tup AS dead_tuples,
+    ROUND(
+        100.0 * n_dead_tup /
+        NULLIF(n_live_tup + n_dead_tup, 0), 2
+    ) AS dead_tuple_pct,
+    last_vacuum,
+    last_autovacuum
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 0
+ORDER BY dead_tuple_pct DESC NULLS LAST, n_dead_tup DESC;
+
+
+--------------------------------------------------------------------------------
+INSIGHT #60: Stored code / object dependencies
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_stored_code_dependencies()
+Headers     : Schema, Object Name, Object Type, Referenced Object
+Description : Dependency relationships for views, materialized views, functions and
+              procedures using PostgreSQL dependency catalogs. The result is focused
+              on stored-code/view objects and excludes system schemas.
+
+SQL Query:
+SELECT DISTINCT
+    v_ns.nspname AS schema_name,
+    v.relname AS object_name,
+    CASE v.relkind
+        WHEN 'v' THEN 'VIEW'
+        WHEN 'm' THEN 'MATERIALIZED VIEW'
+    END AS object_type,
+    ref_ns.nspname || '.' || ref.relname AS referenced_object
+FROM pg_class v
+JOIN pg_namespace v_ns ON v_ns.oid = v.relnamespace
+JOIN pg_rewrite r ON r.ev_class = v.oid
+JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid AND d.refclassid = 'pg_class'::regclass
+JOIN pg_class ref ON ref.oid = d.refobjid
+JOIN pg_namespace ref_ns ON ref_ns.oid = ref.relnamespace
+WHERE v.relkind IN ('v', 'm')
+  AND ref.oid <> v.oid
+  AND v_ns.nspname NOT IN ('pg_catalog','information_schema')
+  AND ref_ns.nspname NOT IN ('pg_catalog','information_schema')
+
+UNION ALL
+
+SELECT DISTINCT
+    p_ns.nspname AS schema_name,
+    p.proname AS object_name,
+    CASE p.prokind
+        WHEN 'f' THEN 'FUNCTION'
+        WHEN 'p' THEN 'PROCEDURE'
+        ELSE 'FUNCTION'
+    END AS object_type,
+    ref_ns.nspname || '.' || ref.relname AS referenced_object
+FROM pg_proc p
+JOIN pg_namespace p_ns ON p_ns.oid = p.pronamespace
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_class'::regclass
+JOIN pg_class ref ON ref.oid = d.refobjid
+JOIN pg_namespace ref_ns ON ref_ns.oid = ref.relnamespace
+WHERE p.prokind IN ('f', 'p')
+  AND p_ns.nspname NOT IN ('pg_catalog','information_schema')
+  AND ref_ns.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY schema_name, object_name, referenced_object;
+
+NOTE:
+For dependency rows involving objects not represented by pg_class/pg_proc,
+additional pg_depend catalog decoding may be required. pg_depend is the
+authoritative PostgreSQL dependency catalog.
+
+
+--------------------------------------------------------------------------------
+INSIGHT #61: Configuration assessment (Top 10)
+--------------------------------------------------------------------------------
+Method Name : PostgreSQLConnector.get_configuration_assessment()
+Headers     : Parameter Name, Setting, Unit, Context
+Description : Key PostgreSQL server configuration parameters useful for assessment.
+
+SQL Query:
+SELECT
+    name AS parameter_name,
+    setting,
+    unit,
+    short_desc AS description
+FROM pg_settings
+WHERE name IN (
+    'max_connections',
+    'shared_buffers',
+    'effective_cache_size',
+    'work_mem',
+    'maintenance_work_mem',
+    'wal_buffers',
+    'checkpoint_timeout',
+    'max_wal_size',
+    'random_page_cost',
+    'effective_io_concurrency'
+)
+ORDER BY CASE name
+    WHEN 'max_connections' THEN 1
+    WHEN 'shared_buffers' THEN 2
+    WHEN 'effective_cache_size' THEN 3
+    WHEN 'work_mem' THEN 4
+    WHEN 'maintenance_work_mem' THEN 5
+    WHEN 'wal_buffers' THEN 6
+    WHEN 'checkpoint_timeout' THEN 7
+    WHEN 'max_wal_size' THEN 8
+    WHEN 'random_page_cost' THEN 9
+    WHEN 'effective_io_concurrency' THEN 10
+    ELSE 11
+END;
+
+
+================================================================================
+SCHEMA FILTERING / CONNECTOR IMPLEMENTATION
+================================================================================
+
+For connector implementations that support:
+  1. One selected schema
+  2. Entire database
+
+apply the schema predicate dynamically.
+
+For pg_class / pg_namespace based queries:
+    AND n.nspname = :schema_name
+
+For information_schema queries:
+    AND table_schema = :schema_name
+
+For pg_stat_user_tables / pg_stat_all_indexes:
+    AND schemaname = :schema_name
+
+For pg_proc / pg_namespace based queries:
+    AND n.nspname = :schema_name
+
+When "Entire Database" is selected, omit the schema predicate.
+
+Do NOT apply schema filtering to cluster/database-wide insights such as:
+  - PostgreSQL version/environment
+  - Database inventory
+  - Users and roles
+  - Server memory/configuration
+  - WAL/archive configuration
+  - Replication role
+  - Physical/configuration file locations
+
+For PostgreSQL extensions:
+  - pg_stat_statements queries require pg_stat_statements.
+  - cron.job queries require pg_cron.
+  - pg_stat_checkpointer is used for current PostgreSQL checkpoint statistics.
+
+Important:
+  - Estimated row counts (reltuples/n_live_tup) are not exact counts.
+  - Dead-tuple percentage is not exact physical bloat percentage.
+  - Tablespace location queries do not provide filesystem total/used/free capacity.
+  - Partition hierarchy queries using pg_inherits should be interpreted carefully because
+    pg_inherits also represents table inheritance.
+  - Duplicate-index candidates require review before dropping any index.
+  - Archival/limited-usage candidates are recommendations only and depend on workload,
+    retention policies and statistics-reset timing.
+
+================================================================================
+END OF POSTGRESQL INSIGHTS & SQL QUERIES REFERENCE
+================================================================================

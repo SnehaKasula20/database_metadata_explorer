@@ -1,0 +1,8 @@
+pyspark
+psycopg2-binary
+pyodbc
+oracledb
+mysql-connector-python
+reportlab
+fastapi
+uvicorn

@@ -1,0 +1,2063 @@
+================================================================================
+            SQL SERVER METADATA INSIGHTS & SQL QUERIES REFERENCE
+================================================================================
+
+IMPORTANT:
+- Queries are intended for Microsoft SQL Server using T-SQL catalog views (sys.tables, sys.indexes, sys.databases, etc.).
+- Multi-database queries use sys.sp_executesql across online user databases.
+- System databases (master, tempdb, model, msdb, mssqlsystemresource, distribution) are excluded from user object inventories.
+- Numbering matches the CLI menu choices (Insights 1 to 60).
+
+COMMON USER-DATABASE FILTER (T-SQL):
+    name NOT IN ('master', 'tempdb', 'model', 'msdb', 'mssqlsystemresource', 'distribution')
+    AND state_desc = 'ONLINE'
+
+
+--------------------------------------------------------------------------------
+INSIGHT #01: 1. Server Environment
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_server_environment()
+Headers     : Server Name, Product Version, Edition, Engine Edition
+Description : Identifies the SQL Server instance version and edition.
+
+SQL Query / Implementation:
+```python
+def get_server_environment(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(255)) AS server_name,
+                CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(255)) AS product_version,
+                CAST(SERVERPROPERTY('Edition') AS NVARCHAR(255)) AS edition,
+                CAST(SERVERPROPERTY('EngineEdition') AS NVARCHAR(255)) AS engine_edition
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #02: 2. Database Inventory
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_inventory()
+Headers     : Database Name, State, Recovery Model, Compatibility Level, Data Size (GB), Log Size (GB), Total Size (GB)
+Description : Lists databases, state, recovery model, storage allocations, and total summary size.
+
+SQL Query / Implementation:
+```python
+def get_database_inventory(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter("d.name")
+        query = f"""
+            SELECT
+                d.name AS database_name,
+                d.state_desc,
+                d.recovery_model_desc,
+                d.compatibility_level,
+                ROUND(SUM(CASE WHEN f.type_desc = \'ROWS\' THEN f.size ELSE 0 END) * 8.0 / 1024 / 1024, 2) AS data_size_gb,
+                ROUND(SUM(CASE WHEN f.type_desc = \'LOG\' THEN f.size ELSE 0 END) * 8.0 / 1024 / 1024, 2) AS log_size_gb,
+                ROUND(SUM(f.size) * 8.0 / 1024 / 1024, 2) AS total_size_gb
+            FROM sys.databases d
+            LEFT JOIN sys.master_files f ON f.database_id = d.database_id
+            WHERE {db_cond}
+            GROUP BY d.name, d.state_desc, d.recovery_model_desc, d.compatibility_level
+            ORDER BY total_size_gb DESC
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: float(r.get("total_size_gb") or 0), reverse=True)
+        if rows:
+            sum_data = round(sum(float(r.get("data_size_gb") or 0) for r in rows), 2)
+            sum_log = round(sum(float(r.get("log_size_gb") or 0) for r in rows), 2)
+            sum_total = round(sum(float(r.get("total_size_gb") or 0) for r in rows), 2)
+            rows.append({
+                "database_name": "TOTAL",
+                "state_desc": "-",
+                "recovery_model_desc": "-",
+                "compatibility_level": "-",
+                "data_size_gb": sum_data,
+                "log_size_gb": sum_log,
+                "total_size_gb": sum_total,
+            })
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #03: 3. Database File Configuration
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_file_configuration()
+Headers     : Database Name, Logical File Name, File Type, Physical Name, Size (GB), Growth Setting
+Description : Reviews database file locations, sizes, and autogrowth configuration.
+
+SQL Query / Implementation:
+```python
+def get_database_file_configuration(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('database_id')
+        query = f"""
+            SELECT
+                DB_NAME(database_id) AS database_name,
+                name AS logical_file_name,
+                type_desc AS file_type,
+                physical_name,
+                ROUND(size * 8.0 / 1024 / 1024, 2) AS size_gb,
+                CASE
+                    WHEN is_percent_growth = 1 THEN CONCAT(growth, '%')
+                    ELSE CONCAT(ROUND(growth * 8.0 / 1024, 2), ' MB')
+                END AS growth_setting
+            FROM sys.master_files
+            WHERE {db_cond}
+            ORDER BY size DESC
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: float(r.get("size_gb") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #04: 4. Data Vs Log Storage
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_data_vs_log_storage()
+Headers     : Database Name, Data (GB), Log (GB), Log to Data Ratio (%)
+Description : Highlights databases where transaction-log allocation is large relative to data allocation.
+
+SQL Query / Implementation:
+```python
+def get_data_vs_log_storage(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('database_id')
+        query = f"""
+            WITH sizes AS (
+                SELECT
+                    database_id,
+                    SUM(CASE WHEN type_desc = 'ROWS' THEN size ELSE 0 END) AS data_pages,
+                    SUM(CASE WHEN type_desc = 'LOG' THEN size ELSE 0 END) AS log_pages
+                FROM sys.master_files
+                WHERE {db_cond}
+                GROUP BY database_id
+            )
+            SELECT
+                DB_NAME(database_id) AS database_name,
+                ROUND(data_pages * 8.0 / 1024 / 1024, 2) AS data_gb,
+                ROUND(log_pages * 8.0 / 1024 / 1024, 2) AS log_gb,
+                ROUND(log_pages * 100.0 / NULLIF(data_pages, 0), 2) AS log_to_data_ratio_pct
+            FROM sizes
+            ORDER BY log_to_data_ratio_pct DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #05: 5. Database Free Space
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_free_space()
+Headers     : Database Name, File Name, Allocated (GB), Used (GB), Free (GB), Free (%)
+Description : Estimates allocated, used, and free space within data files.
+
+SQL Query / Implementation:
+```python
+def get_database_free_space(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                df.name AS file_name,
+                ROUND(df.size * 8.0 / 1024 / 1024, 2) AS allocated_gb,
+                ROUND(FILEPROPERTY(df.name, ''SpaceUsed'') * 8.0 / 1024 / 1024, 2) AS used_gb,
+                ROUND((df.size - FILEPROPERTY(df.name, ''SpaceUsed'')) * 8.0 / 1024 / 1024, 2) AS free_gb,
+                ROUND((df.size - FILEPROPERTY(df.name, ''SpaceUsed'')) * 100.0 / NULLIF(df.size,0), 2) AS free_pct
+            FROM sys.database_files df
+            WHERE df.type_desc = ''ROWS'';
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #06: 6. Top 100 Largest Tables
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_largest_tables()
+Headers     : Database Name, Schema, Table Name, Row Count, Reserved (MB), Reserved (GB)
+Description : Finds the top 100 largest user tables by row count across online user databases.
+
+SQL Query / Implementation:
+```python
+def get_largest_tables(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT TOP (100)
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                SUM(p.rows) AS row_count,
+                ROUND(SUM(a.total_pages) * 8.0 / 1024, 2) AS reserved_mb,
+                ROUND(SUM(a.total_pages) * 8.0 / 1024 / 1024, 4) AS reserved_gb
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN (0,1)
+            JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id = i.index_id
+            JOIN sys.allocation_units a ON a.container_id = p.partition_id
+            GROUP BY s.name, t.name
+            ORDER BY SUM(p.rows) DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("row_count") or 0), reverse=True)
+        return rows[:100]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #07: 7. Schema Inventory
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_schema_inventory()
+Headers     : Database Name, Schema, Object Count
+Description : Shows user schemas and the number of objects they contain.
+
+SQL Query / Implementation:
+```python
+def get_schema_inventory(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                COUNT(o.object_id) AS object_count
+            FROM sys.schemas s
+            LEFT JOIN sys.objects o ON o.schema_id = s.schema_id
+            WHERE s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'')
+            GROUP BY s.name
+            HAVING COUNT(o.object_id) > 0
+            ORDER BY object_count DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows = [r for r in rows if int(r.get("object_count") or 0) > 0]
+        rows.sort(key=lambda r: int(r.get("object_count") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #08: 8. Master (Parent) Tables
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_master_tables()
+Headers     : Database Name, Schema, Master Table Name, Child FKs In, Referencing Child Tables
+Description : Tables referenced by foreign key constraints in child tables.
+
+SQL Query / Implementation:
+```python
+def get_master_tables(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            WITH rel AS (
+                SELECT DISTINCT
+                    ps.name AS schema_name,
+                    pt.name AS table_name,
+                    CONCAT(cs.name, ''.'', ct.name) AS child_table,
+                    fk.object_id AS fk_id
+                FROM sys.foreign_keys fk
+                JOIN sys.tables pt ON pt.object_id = fk.referenced_object_id
+                JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+                JOIN sys.tables ct ON ct.object_id = fk.parent_object_id
+                JOIN sys.schemas cs ON cs.schema_id = ct.schema_id
+            )
+            SELECT
+                DB_NAME() AS database_name,
+                schema_name,
+                table_name,
+                COUNT(DISTINCT fk_id) AS child_fk_count,
+                STRING_AGG(child_table, '', '') WITHIN GROUP (ORDER BY child_table) AS child_tables
+            FROM rel
+            GROUP BY schema_name, table_name
+            ORDER BY child_fk_count DESC, schema_name, table_name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("child_fk_count") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #09: 9. Child Tables
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_child_tables()
+Headers     : Database Name, Schema, Child Table Name, Parent FKs Out, Referenced Parent Tables
+Description : Tables containing foreign key constraints pointing to parent tables.
+
+SQL Query / Implementation:
+```python
+def get_child_tables(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            WITH rel AS (
+                SELECT DISTINCT
+                    cs.name AS schema_name,
+                    ct.name AS table_name,
+                    CONCAT(ps.name, ''.'', pt.name) AS parent_table,
+                    fk.object_id AS fk_id
+                FROM sys.foreign_keys fk
+                JOIN sys.tables ct ON ct.object_id = fk.parent_object_id
+                JOIN sys.schemas cs ON cs.schema_id = ct.schema_id
+                JOIN sys.tables pt ON pt.object_id = fk.referenced_object_id
+                JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+            )
+            SELECT
+                DB_NAME() AS database_name,
+                schema_name,
+                table_name,
+                COUNT(DISTINCT fk_id) AS parent_fk_count,
+                STRING_AGG(parent_table, '', '') WITHIN GROUP (ORDER BY parent_table) AS parent_tables
+            FROM rel
+            GROUP BY schema_name, table_name
+            ORDER BY parent_fk_count DESC, schema_name, table_name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("parent_fk_count") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #10: 10. Independent Tables
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_independent_tables()
+Headers     : Database Name, Schema, Independent Table Name
+Description : Standalone tables with no foreign key relationships (neither parent nor child).
+
+SQL Query / Implementation:
+```python
+def get_independent_tables(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN (
+                SELECT parent_object_id AS object_id FROM sys.foreign_keys
+                UNION
+                SELECT referenced_object_id AS object_id FROM sys.foreign_keys
+            ) fk ON fk.object_id = t.object_id
+            WHERE fk.object_id IS NULL
+              AND t.is_ms_shipped = 0
+            ORDER BY s.name, t.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: (str(r.get("database_name") or "").lower(), str(r.get("schema_name") or "").lower(), str(r.get("table_name") or "").lower()))
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #11: 11. Table Inventory
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_table_inventory()
+Headers     : Database Name, Schema, Table Name, Create Date, Modify Date
+Description : Inventories user tables and their creation/modification metadata.
+
+SQL Query / Implementation:
+```python
+def get_table_inventory(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                t.create_date,
+                t.modify_date
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            ORDER BY s.name, t.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: (str(r.get("database_name") or "").lower(), str(r.get("schema_name") or "").lower(), str(r.get("table_name") or "").lower()))
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #12: 12. Primary Keys
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_primary_keys()
+Headers     : Database Name, Schema, Table Name, Primary Key Name, Key Columns
+Description : Lists primary keys and their participating columns.
+
+SQL Query / Implementation:
+```python
+def get_primary_keys(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                kc.name AS primary_key_name,
+                STRING_AGG(c.name, '', '') WITHIN GROUP (ORDER BY ic.key_ordinal) AS key_columns
+            FROM sys.key_constraints kc
+            JOIN sys.tables t ON t.object_id = kc.parent_object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.index_columns ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
+            JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE kc.type = ''PK''
+            GROUP BY s.name, t.name, kc.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #13: 13. Tables Without Primary Keys
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_tables_without_primary_keys()
+Headers     : Database Name, Schema, Table Name
+Description : Identifies user tables that do not have a primary key.
+
+SQL Query / Implementation:
+```python
+def get_tables_without_primary_keys(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.indexes i
+                ON i.object_id = t.object_id
+               AND i.is_primary_key = 1
+            WHERE i.object_id IS NULL
+              AND t.is_ms_shipped = 0
+            ORDER BY s.name, t.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: (str(r.get("database_name") or "").lower(), str(r.get("schema_name") or "").lower(), str(r.get("table_name") or "").lower()))
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #14: 14. Foreign Keys
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_foreign_keys()
+Headers     : Database Name, Parent Schema, Parent Table, Child Schema, Child Table, Foreign Key Name
+Description : Maps foreign-key relationships between tables.
+
+SQL Query / Implementation:
+```python
+def get_foreign_keys(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                ps.name AS parent_schema,
+                pt.name AS parent_table,
+                rs.name AS child_schema,
+                rt.name AS child_table,
+                fk.name AS foreign_key_name
+            FROM sys.foreign_keys fk
+            JOIN sys.tables pt ON pt.object_id = fk.referenced_object_id
+            JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+            JOIN sys.tables rt ON rt.object_id = fk.parent_object_id
+            JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+            ORDER BY parent_schema, parent_table, child_schema, child_table;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #15: 15. Tables With Many Foreign Keys
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_tables_with_many_foreign_keys()
+Headers     : Database Name, Schema, Table Name, Foreign Key Count
+Description : Identifies tables with many foreign-key relationships, useful for dependency and design review.
+
+SQL Query / Implementation:
+```python
+def get_tables_with_many_foreign_keys(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                COUNT(fk.object_id) AS foreign_key_count
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.foreign_keys fk ON fk.parent_object_id = t.object_id
+            GROUP BY s.name, t.name
+            HAVING COUNT(fk.object_id) > 0
+            ORDER BY foreign_key_count DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("foreign_key_count") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #16: 16. Index Inventory
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_index_inventory()
+Headers     : Database Name, Schema, Table Name, Index Name, Index Type, Is Unique, Is Disabled
+Description : Inventories indexes and their main properties.
+
+SQL Query / Implementation:
+```python
+def get_index_inventory(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                i.name AS index_name,
+                i.type_desc AS index_type,
+                i.is_unique,
+                i.is_disabled
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE i.index_id > 0
+            ORDER BY i.type_desc, s.name, t.name, i.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: (str(r.get("index_type") or "").lower(), str(r.get("database_name") or "").lower(), str(r.get("schema_name") or "").lower(), str(r.get("table_name") or "").lower(), str(r.get("index_name") or "").lower()))
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #17: 17. Index Count By Table
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_index_count_by_table()
+Headers     : Database Name, Schema, Table Name, Index Count
+Description : Finds tables with unusually high numbers of indexes.
+
+SQL Query / Implementation:
+```python
+def get_index_count_by_table(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                COUNT(i.index_id) AS index_count
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id > 0
+            GROUP BY s.name, t.name
+            ORDER BY index_count DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("index_count") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #18: 18. Largest Indexes
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_largest_indexes()
+Headers     : Database Name, Schema, Table Name, Index Name, Size (MB), Size (GB)
+Description : Identifies the top 100 largest indexes consuming the most storage.
+
+SQL Query / Implementation:
+```python
+def get_largest_indexes(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT TOP (100)
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                i.name AS index_name,
+                ROUND(SUM(ps.reserved_page_count) * 8.0 / 1024, 2) AS size_mb,
+                ROUND(SUM(ps.reserved_page_count) * 8.0 / 1024 / 1024, 4) AS size_gb
+            FROM sys.dm_db_partition_stats ps
+            JOIN sys.indexes i ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            GROUP BY s.name, t.name, i.name
+            ORDER BY SUM(ps.reserved_page_count) DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: float(r.get("size_mb") or 0), reverse=True)
+        return rows[:100]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #19: 19. Disabled Indexes
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_disabled_indexes()
+Headers     : Database Name, Schema, Table Name, Index Name
+Description : Finds disabled indexes that may affect query performance or maintenance processes.
+
+SQL Query / Implementation:
+```python
+def get_disabled_indexes(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                i.name AS index_name
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE i.is_disabled = 1
+            ORDER BY s.name, t.name, i.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #20: 20. Fragmented Indexes
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_fragmented_indexes()
+Headers     : Database Name, Schema, Table Name, Index Name, Avg Fragmentation (%), Page Count
+Description : Finds indexes with significant logical fragmentation using LIMITED sampling.
+
+SQL Query / Implementation:
+```python
+def get_fragmented_indexes(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                i.name AS index_name,
+                ips.avg_fragmentation_in_percent AS avg_fragmentation_pct,
+                ips.page_count
+            FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, ''LIMITED'') ips
+            JOIN sys.indexes i ON i.object_id = ips.object_id AND i.index_id = ips.index_id
+            JOIN sys.tables t ON t.object_id = ips.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE ips.index_id > 0
+              AND ips.page_count >= 1000
+              AND ips.avg_fragmentation_in_percent >= 30
+            ORDER BY ips.avg_fragmentation_in_percent DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: float(r.get("avg_fragmentation_pct") or 0), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #21: 21. Index Usage
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_index_usage()
+Headers     : Database Name, Schema, Table Name, Index Name, Seeks, Scans, Lookups, Updates
+Description : Shows index read/write activity for active indexes with recorded usage.
+
+SQL Query / Implementation:
+```python
+def get_index_usage(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                i.name AS index_name,
+                COALESCE(us.user_seeks,0) AS seeks,
+                COALESCE(us.user_scans,0) AS scans,
+                COALESCE(us.user_lookups,0) AS lookups,
+                COALESCE(us.user_updates,0) AS updates
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.dm_db_index_usage_stats us
+                ON us.database_id = DB_ID()
+               AND us.object_id = i.object_id
+               AND us.index_id = i.index_id
+            WHERE i.index_id > 0
+              AND (COALESCE(us.user_seeks,0) + COALESCE(us.user_scans,0) + COALESCE(us.user_lookups,0) + COALESCE(us.user_updates,0)) > 0
+            ORDER BY (COALESCE(us.user_seeks,0) + COALESCE(us.user_scans,0) + COALESCE(us.user_lookups,0) + COALESCE(us.user_updates,0)) DESC, s.name, t.name, i.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows = [r for r in rows if (int(r.get("seeks") or 0) + int(r.get("scans") or 0) + int(r.get("lookups") or 0) + int(r.get("updates") or 0)) > 0]
+        # Step 1: Sort by database, schema, table, index name ascending
+        rows.sort(key=lambda r: (
+            str(r.get("database_name") or "").lower(),
+            str(r.get("schema_name") or "").lower(),
+            str(r.get("table_name") or "").lower(),
+            str(r.get("index_name") or "").lower()
+        ))
+        # Step 2: Stable sort by total activity (seeks + scans + lookups + updates) descending
+        rows.sort(key=lambda r: (
+            int(r.get("seeks") or 0) + int(r.get("scans") or 0) + int(r.get("lookups") or 0) + int(r.get("updates") or 0)
+        ), reverse=True)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #22: 22. Duplicate Or Overlapping Indexes
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_duplicate_or_overlapping_indexes()
+Headers     : Database Name, Schema, Table Name, Index 1, Index 2, Key Columns
+Description : Finds indexes with identical leading key-column definitions on the same table.
+
+SQL Query / Implementation:
+```python
+def get_duplicate_or_overlapping_indexes(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            WITH idx AS (
+                SELECT
+                    i.object_id,
+                    i.index_id,
+                    i.name,
+                    STRING_AGG(c.name, '', '') WITHIN GROUP (ORDER BY ic.key_ordinal) AS key_columns
+                FROM sys.indexes i
+                JOIN sys.index_columns ic
+                  ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+                JOIN sys.columns c
+                  ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                WHERE i.index_id > 0
+                GROUP BY i.object_id, i.index_id, i.name
+            )
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                a.name AS index_1,
+                b.name AS index_2,
+                a.key_columns
+            FROM idx a
+            JOIN idx b ON a.object_id = b.object_id
+                      AND a.key_columns = b.key_columns
+                      AND a.index_id < b.index_id
+            JOIN sys.tables t ON t.object_id = a.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            ORDER BY s.name, t.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #23: 23. Missing Index Recommendations
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_missing_index_recommendations()
+Headers     : Database Name, Schema, Table Name, User Seeks, User Scans, Avg Cost, Avg Impact (%), Equality Columns, Inequality Columns, Included Columns
+Description : Shows missing-index DMV recommendations that SQL Server has generated since the relevant DMV counters were populated.
+
+SQL Query / Implementation:
+```python
+def get_missing_index_recommendations(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('mid.database_id')
+        query = f"""
+            SELECT
+                DB_NAME(mid.database_id) AS database_name,
+                OBJECT_SCHEMA_NAME(mid.object_id, mid.database_id) AS schema_name,
+                OBJECT_NAME(mid.object_id, mid.database_id) AS table_name,
+                migs.user_seeks,
+                migs.user_scans,
+                migs.avg_total_user_cost,
+                migs.avg_user_impact,
+                mid.equality_columns,
+                mid.inequality_columns,
+                mid.included_columns
+            FROM sys.dm_db_missing_index_groups mig
+            JOIN sys.dm_db_missing_index_group_stats migs
+                ON mig.index_group_handle = migs.group_handle
+            JOIN sys.dm_db_missing_index_details mid
+                ON mig.index_handle = mid.index_handle
+            WHERE {db_cond}
+            ORDER BY (migs.user_seeks + migs.user_scans) DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #24: 24. Views
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_views()
+Headers     : Database Name, Schema, View Name, Create Date, Modify Date
+Description : Inventories views used in the database.
+
+SQL Query / Implementation:
+```python
+def get_views(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                v.name AS view_name,
+                v.create_date,
+                v.modify_date
+            FROM sys.views v
+            JOIN sys.schemas s ON s.schema_id = v.schema_id
+            ORDER BY s.name, v.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #25: 25. Stored Procedures
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_stored_procedures()
+Headers     : Database Name, Schema, Procedure Name, Create Date, Modify Date
+Description : Inventories stored procedures and modification timestamps.
+
+SQL Query / Implementation:
+```python
+def get_stored_procedures(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                p.name AS procedure_name,
+                p.create_date,
+                p.modify_date
+            FROM sys.procedures p
+            JOIN sys.schemas s ON s.schema_id = p.schema_id
+            ORDER BY s.name, p.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #26: 26. Functions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_functions()
+Headers     : Database Name, Schema, Function Name, Function Type, Create Date, Modify Date
+Description : Inventories user-defined functions.
+
+SQL Query / Implementation:
+```python
+def get_functions(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                o.name AS function_name,
+                o.type_desc AS function_type,
+                o.create_date,
+                o.modify_date
+            FROM sys.objects o
+            JOIN sys.schemas s ON s.schema_id = o.schema_id
+            WHERE o.type IN (''FN'', ''IF'', ''TF'')
+            ORDER BY s.name, o.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #27: 27. Triggers
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_triggers()
+Headers     : Database Name, Schema, Table Name, Trigger Name, Is Disabled
+Description : Inventories DML triggers on user tables.
+
+SQL Query / Implementation:
+```python
+def get_triggers(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                tr.name AS trigger_name,
+                tr.is_disabled
+            FROM sys.triggers tr
+            JOIN sys.tables t ON t.object_id = tr.parent_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE tr.parent_class = 1
+            ORDER BY s.name, t.name, tr.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #28: 28. Object Dependencies
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_object_dependencies()
+Headers     : Database Name, Referencing Schema, Referencing Object, Referencing Object Type, Referenced Schema, Referenced Object, Referenced Object Type
+Description : Maps module/object dependencies for impact analysis.
+
+SQL Query / Implementation:
+```python
+def get_object_dependencies(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                OBJECT_SCHEMA_NAME(d.referencing_id) AS referencing_schema,
+                OBJECT_NAME(d.referencing_id) AS referencing_object,
+                COALESCE(o.type_desc, ''<unknown>'') AS referencing_object_type,
+                COALESCE(d.referenced_schema_name, ''<external/unknown>'') AS referenced_schema,
+                COALESCE(d.referenced_entity_name, ''<unknown>'') AS referenced_object,
+                COALESCE(ref_o.type_desc, d.referenced_class_desc, ''<unknown>'') AS referenced_object_type
+            FROM sys.sql_expression_dependencies d
+            LEFT JOIN sys.objects o ON o.object_id = d.referencing_id
+            LEFT JOIN sys.objects ref_o ON ref_o.object_id = d.referenced_id
+            WHERE d.referencing_id IS NOT NULL
+            ORDER BY referencing_schema, referencing_object;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #29: 29. Database Roles
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_roles()
+Headers     : Database Name, Role Name, Member Name
+Description : Shows database role memberships for security review.
+
+SQL Query / Implementation:
+```python
+def get_database_roles(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                r.name AS role_name,
+                m.name AS member_name
+            FROM sys.database_role_members drm
+            JOIN sys.database_principals r ON r.principal_id = drm.role_principal_id
+            JOIN sys.database_principals m ON m.principal_id = drm.member_principal_id
+            ORDER BY r.name, m.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #30: 30. Database Permissions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_permissions()
+Headers     : Database Name, Grantee, Permission, State, Schema, Object Name
+Description : Reviews explicit database/object permissions granted or denied to non-system principals on user objects.
+
+SQL Query / Implementation:
+```python
+def get_database_permissions(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                grantee.name AS grantee,
+                dp.permission_name,
+                dp.state_desc,
+                COALESCE(OBJECT_SCHEMA_NAME(dp.major_id), '''') AS schema_name,
+                COALESCE(OBJECT_NAME(dp.major_id), '''') AS object_name
+            FROM sys.database_permissions dp
+            JOIN sys.database_principals grantee
+                ON grantee.principal_id = dp.grantee_principal_id
+            WHERE grantee.name NOT IN (''public'', ''guest'', ''sys'', ''INFORMATION_SCHEMA'')
+              AND (dp.major_id = 0 OR OBJECT_SCHEMA_NAME(dp.major_id) NOT IN (''sys'', ''INFORMATION_SCHEMA''))
+              AND (dp.major_id = 0 OR OBJECTPROPERTY(dp.major_id, ''IsMSShipped'') = 0 OR OBJECTPROPERTY(dp.major_id, ''IsMSShipped'') IS NULL)
+            ORDER BY grantee.name, dp.permission_name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #31: 31. SQL Agent Jobs
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_sql_agent_jobs()
+Headers     : Job Name, Enabled, Owner, Date Created
+Description : Inventories SQL Server Agent jobs and their enabled state.
+
+SQL Query / Implementation:
+```python
+def get_sql_agent_jobs(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                j.name AS job_name,
+                j.enabled,
+                SUSER_SNAME(j.owner_sid) AS owner,
+                j.date_created
+            FROM msdb.dbo.sysjobs j
+            ORDER BY j.name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #32: 32. Failed SQL Agent Jobs
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_failed_sql_agent_jobs()
+Headers     : Job Name, Run Datetime, Run Status, Message
+Description : Finds recent SQL Server Agent job executions that did not succeed.
+
+SQL Query / Implementation:
+```python
+def get_failed_sql_agent_jobs(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT TOP (100)
+                j.name AS job_name,
+                msdb.dbo.agent_datetime(h.run_date, h.run_time) AS run_datetime,
+                h.run_status,
+                h.message
+            FROM msdb.dbo.sysjobhistory h
+            JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+            WHERE h.step_id = 0
+              AND h.run_status <> 1
+            ORDER BY run_datetime DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #33: 33. Active Sessions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_active_sessions()
+Headers     : Session ID, Login Name, Host Name, Program Name, Status, CPU Time, Memory Usage, Reads, Writes
+Description : Shows currently active user sessions and their resource counters.
+
+SQL Query / Implementation:
+```python
+def get_active_sessions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                s.session_id,
+                s.login_name,
+                s.host_name,
+                s.program_name,
+                s.status,
+                s.cpu_time,
+                s.memory_usage,
+                s.reads,
+                s.writes
+            FROM sys.dm_exec_sessions s
+            WHERE s.is_user_process = 1
+            ORDER BY s.cpu_time DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #34: 34. Blocking Sessions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_blocking_sessions()
+Headers     : Session ID, Blocking Session ID, Wait Type, Wait Time (ms), Database, SQL Text
+Description : Identifies currently blocked requests and their blockers.
+
+SQL Query / Implementation:
+```python
+def get_blocking_sessions(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('r.database_id')
+        query = f"""
+            SELECT
+                r.session_id,
+                r.blocking_session_id,
+                r.wait_type,
+                r.wait_time AS wait_time_ms,
+                DB_NAME(r.database_id) AS database_name,
+                t.text AS sql_text
+            FROM sys.dm_exec_requests r
+            CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+            WHERE r.blocking_session_id <> 0
+              AND {db_cond}
+            ORDER BY r.wait_time DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #35: 35. Long-Running Requests
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_long_running_requests()
+Headers     : Session ID, Database, Start Time, Elapsed Sec, CPU Time (ms), SQL Text
+Description : Finds currently executing requests with high elapsed time.
+
+SQL Query / Implementation:
+```python
+def get_long_running_requests(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('r.database_id')
+        query = f"""
+            SELECT
+                r.session_id,
+                DB_NAME(r.database_id) AS database_name,
+                r.start_time,
+                DATEDIFF(SECOND, r.start_time, GETDATE()) AS elapsed_seconds,
+                r.cpu_time AS cpu_time_ms,
+                t.text AS sql_text
+            FROM sys.dm_exec_requests r
+            CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+            WHERE r.session_id <> @@SPID
+              AND {db_cond}
+            ORDER BY elapsed_seconds DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #36: 36. Top CPU Queries
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_top_cpu_queries()
+Headers     : Exec Count, Total CPU (ms), Avg CPU (ms), Total Elapsed (ms), SQL Text
+Description : Finds cached query statements consuming the most CPU.
+
+SQL Query / Implementation:
+```python
+def get_top_cpu_queries(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT TOP (100)
+                qs.execution_count,
+                qs.total_worker_time / 1000 AS total_cpu_ms,
+                qs.total_worker_time / NULLIF(qs.execution_count,0) / 1000 AS avg_cpu_ms,
+                qs.total_elapsed_time / 1000 AS total_elapsed_ms,
+                SUBSTRING(st.text,
+                          (qs.statement_start_offset/2)+1,
+                          ((CASE qs.statement_end_offset
+                                WHEN -1 THEN DATALENGTH(st.text)
+                                ELSE qs.statement_end_offset END
+                            - qs.statement_start_offset)/2)+1) AS sql_text
+            FROM sys.dm_exec_query_stats qs
+            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+            ORDER BY qs.total_worker_time DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #37: 37. Top IO Queries
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_top_io_queries()
+Headers     : Exec Count, Total Logical Reads, Avg Logical Reads, Total Logical Writes, SQL Text
+Description : Finds cached queries with high logical I/O activity.
+
+SQL Query / Implementation:
+```python
+def get_top_io_queries(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT TOP (100)
+                qs.execution_count,
+                qs.total_logical_reads,
+                qs.total_logical_reads / NULLIF(qs.execution_count,0) AS avg_logical_reads,
+                qs.total_logical_writes,
+                SUBSTRING(st.text,
+                          (qs.statement_start_offset/2)+1,
+                          ((CASE qs.statement_end_offset
+                                WHEN -1 THEN DATALENGTH(st.text)
+                                ELSE qs.statement_end_offset END
+                            - qs.statement_start_offset)/2)+1) AS sql_text
+            FROM sys.dm_exec_query_stats qs
+            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+            ORDER BY qs.total_logical_reads + qs.total_logical_writes DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #38: 38. Wait Statistics
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_wait_statistics()
+Headers     : Wait Type, Waiting Tasks Count, Wait Time (ms), Signal Wait Time (ms)
+Description : Displays top 20 meaningful resource wait statistics, excluding known idle background tasks.
+
+SQL Query / Implementation:
+```python
+def get_wait_statistics(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT TOP (20)
+                wait_type,
+                waiting_tasks_count,
+                wait_time_ms,
+                signal_wait_time_ms
+            FROM sys.dm_os_wait_stats
+            WHERE wait_time_ms > 0
+              AND wait_type NOT IN (
+                'BROKER_EVENTHANDLER', 'BROKER_RECEIVE_WAITFOR', 'BROKER_TASK_STOP',
+                'BROKER_TO_FLUSH', 'BROKER_TRANSMITTER', 'CHECKPOINT_QUEUE', 'CHKPT',
+                'CLR_AUTO_EVENT', 'CLR_MANUAL_EVENT', 'CLR_SEMAPHORE', 'CXCONSUMER',
+                'DBMIRROR_DBM_EVENT', 'DBMIRROR_EVENTS_QUEUE', 'DBMIRROR_WORKER_QUEUE',
+                'DBMIRRORING_CMD', 'DIRTY_PAGE_POLL', 'DISPATCHER_QUEUE_SEMAPHORE',
+                'EXECSYNC', 'FSAGENT', 'FT_IFTS_SCHEDULER_IDLE_WAIT', 'FT_IFTSHC_MUTEX',
+                'HADR_CLUSAPI_CALL', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION', 'HADR_LOGCAPTURE_WAIT',
+                'HADR_NOTIFICATION_DEQUEUE', 'HADR_TIMER_TASK', 'HADR_WORK_QUEUE',
+                'KSOURCE_WAKEUP', 'LAZYWRITER_SLEEP', 'LOGMGR_QUEUE', 'MEMORY_ALLOCATION_EXT',
+                'ONDEMAND_TASK_QUEUE', 'PARALLEL_REDO_DRAIN_WORKSPACE', 'PARALLEL_REDO_LOG_CACHE',
+                'PARALLEL_REDO_TRAN_LIST', 'PARALLEL_REDO_WORKER_SYNC', 'PARALLEL_REDO_WORKER_WAIT',
+                'PREEMPTIVE_OS_FLUSHFILTERBUFFERS', 'PREEMPTIVE_XE_GETTARGETSTATE',
+                'PWAIT_ALL_COMPONENTS_INITIALIZED', 'PWAIT_DIRECTLOGCONSUMER_GETNEXT',
+                'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', 'QDS_ASYNC_QUEUE',
+                'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', 'QDS_SHUTDOWN_QUEUE',
+                'REDUNDANT_CLIENT_INFO', 'REQUEST_FOR_DEADLOCK_SEARCH', 'RESOURCE_QUEUE',
+                'SERVER_IDLE_CHECK', 'SLEEP_BPOOL_FLUSH', 'SLEEP_DBSTARTUP', 'SLEEP_DCOMSTARTUP',
+                'SLEEP_MASTERDBREADY', 'SLEEP_MASTERMDREADY', 'SLEEP_MASTERUPGRADED',
+                'SLEEP_MSDBSTARTUP', 'SLEEP_SYSTEMTASK', 'SLEEP_TASK', 'SLEEP_TEMPDBSTARTUP',
+                'SNI_HTTP_ACCEPT', 'SOS_WORK_DISPATCHER', 'SP_SERVER_DIAGNOSTICS_SLEEP',
+                'SQLTRACE_BUFFER_FLUSH', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', 'SQLTRACE_WAIT_ENTRIES',
+                'STARTUP_DEPENDENCY_MANAGER', 'WAIT_FOR_RESULTS', 'WAITFOR',
+                'WAITFOR_TASKSHUTDOWN', 'WAIT_XTP_HOST_WAIT', 'WAIT_XTP_OFFLINE_CKPT_NEW_LOG',
+                'WAIT_XTP_CKPT_CLOSE', 'XE_DISPATCHER_JOIN', 'XE_DISPATCHER_WAIT',
+                'XE_TIMER_EVENT', 'XE_LIVE_TARGET_TVF'
+            )
+            ORDER BY wait_time_ms DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #39: 39. Active Transactions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_active_transactions()
+Headers     : Transaction ID, Begin Time, State, Session ID
+Description : Lists active transactions and their current state.
+
+SQL Query / Implementation:
+```python
+def get_active_transactions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                at.transaction_id,
+                at.transaction_begin_time,
+                at.transaction_state,
+                st.session_id
+            FROM sys.dm_tran_active_transactions at
+            LEFT JOIN sys.dm_tran_session_transactions st
+                ON st.transaction_id = at.transaction_id
+            ORDER BY at.transaction_begin_time
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #40: 40. Long-Running Transactions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_long_running_transactions()
+Headers     : Session ID, Begin Time, Elapsed (min), Database Name
+Description : Identifies transactions that have remained active for a long time.
+
+SQL Query / Implementation:
+```python
+def get_long_running_transactions(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('dt.database_id')
+        query = f"""
+            SELECT
+                st.session_id,
+                at.transaction_begin_time,
+                DATEDIFF(MINUTE, at.transaction_begin_time, GETDATE()) AS elapsed_minutes,
+                DB_NAME(dt.database_id) AS database_name
+            FROM sys.dm_tran_active_transactions at
+            JOIN sys.dm_tran_session_transactions st
+                ON st.transaction_id = at.transaction_id
+            LEFT JOIN sys.dm_tran_database_transactions dt
+                ON dt.transaction_id = at.transaction_id
+            WHERE {db_cond}
+            ORDER BY elapsed_minutes DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #41: 41. Memory Usage
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_memory_usage()
+Headers     : Total Physical Memory (GB), Used Physical Memory (GB), Available Physical Memory (GB), Memory State
+Description : Reports operating-system memory visibility and SQL Server memory state.
+
+SQL Query / Implementation:
+```python
+def get_memory_usage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                ROUND(total_physical_memory_kb / 1024.0 / 1024, 2) AS total_physical_memory_gb,
+                ROUND((total_physical_memory_kb - available_physical_memory_kb) / 1024.0 / 1024, 2) AS used_physical_memory_gb,
+                ROUND(available_physical_memory_kb / 1024.0 / 1024, 2) AS available_physical_memory_gb,
+                system_memory_state_desc AS memory_state
+            FROM sys.dm_os_sys_memory
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #42: 42. TempDB Usage
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_tempdb_usage()
+Headers     : Session ID, User Objects (MB), Internal Objects (MB), Total Allocated (MB)
+Description : Shows current TempDB allocation by session.
+
+SQL Query / Implementation:
+```python
+def get_tempdb_usage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                session_id,
+                ROUND((user_objects_alloc_page_count - user_objects_dealloc_page_count) * 8.0 / 1024, 2) AS user_objects_mb,
+                ROUND((internal_objects_alloc_page_count - internal_objects_dealloc_page_count) * 8.0 / 1024, 2) AS internal_objects_mb,
+                ROUND(((user_objects_alloc_page_count - user_objects_dealloc_page_count) + (internal_objects_alloc_page_count - internal_objects_dealloc_page_count)) * 8.0 / 1024, 2) AS total_allocated_mb
+            FROM sys.dm_db_session_space_usage
+            WHERE ((user_objects_alloc_page_count - user_objects_dealloc_page_count) + (internal_objects_alloc_page_count - internal_objects_dealloc_page_count)) > 0
+            ORDER BY total_allocated_mb DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #43: 43. TempDB File Configuration
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_tempdb_file_configuration()
+Headers     : File ID, File Name, Physical Name, Size (MB), Growth Setting
+Description : Reviews TempDB data/log file sizing and growth settings.
+
+SQL Query / Implementation:
+```python
+def get_tempdb_file_configuration(self) -> List[Dict[str, Any]]:
+        query = """
+            USE tempdb;
+            SELECT
+                file_id,
+                name AS file_name,
+                physical_name,
+                ROUND(size * 8.0 / 1024, 2) AS size_mb,
+                CASE
+                    WHEN is_percent_growth = 1 THEN CONCAT(growth, '%')
+                    ELSE CONCAT(ROUND(growth * 8.0 / 1024, 2), ' MB')
+                END AS growth_setting
+            FROM sys.database_files
+            ORDER BY file_id;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #44: 44. Query Store Status
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_query_store_status()
+Headers     : Database Name, Desired State, Actual State, Readonly Reason, Current Storage (MB), Max Storage (MB)
+Description : Reviews Query Store configuration and storage state per database.
+
+SQL Query / Implementation:
+```python
+def get_query_store_status(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                desired_state_desc AS desired_state,
+                actual_state_desc AS actual_state,
+                readonly_reason,
+                current_storage_size_mb,
+                max_storage_size_mb
+            FROM sys.database_query_store_options;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #45: 45. Database Scoped Configuration
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_scoped_configuration()
+Headers     : Database Name, Configuration Name, Value, Value for Secondary
+Description : Reviews top 10 key database-scoped configuration settings per database.
+
+SQL Query / Implementation:
+```python
+def get_database_scoped_configuration(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT TOP (10)
+                DB_NAME() AS database_name,
+                name AS configuration_name,
+                CAST(value AS NVARCHAR(255)) AS value,
+                CAST(value_for_secondary AS NVARCHAR(255)) AS value_for_secondary
+            FROM sys.database_scoped_configurations
+            WHERE LOWER(name) IN (
+                ''maxdop'',
+                ''legacy_cardinality_estimation'',
+                ''parameter_sniffing'',
+                ''query_optimizer_hotfixes'',
+                ''identity_cache'',
+                ''optimize_for_ad_hoc_workloads'',
+                ''elevate_online'',
+                ''elevate_resumable'',
+                ''lightweight_query_profiling'',
+                ''paused_resumable_index_abort_duration_minutes''
+            )
+            ORDER BY name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #46: 46. Recovery Model And Log Reuse
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_recovery_model_and_log_reuse()
+Headers     : Database Name, Recovery Model, Log Reuse Wait Reason
+Description : Identifies recovery model and reasons that may prevent transaction-log reuse.
+
+SQL Query / Implementation:
+```python
+def get_recovery_model_and_log_reuse(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            SELECT
+                name AS database_name,
+                recovery_model_desc,
+                log_reuse_wait_desc
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond}
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #47: 47. Backup History
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_backup_history()
+Headers     : Database Name, Backup Type, Start Date, Finish Date, Backup Size (MB)
+Description : Reviews recent database backup history and backup types.
+
+SQL Query / Implementation:
+```python
+def get_backup_history(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('d.name')
+        query = f"""
+            SELECT TOP (200)
+                d.name AS database_name,
+                CASE bs.type
+                    WHEN 'D' THEN 'FULL'
+                    WHEN 'I' THEN 'DIFFERENTIAL'
+                    WHEN 'L' THEN 'LOG'
+                    ELSE bs.type
+                END AS backup_type,
+                bs.backup_start_date,
+                bs.backup_finish_date,
+                ROUND(bs.backup_size / 1024.0 / 1024, 2) AS backup_size_mb
+            FROM msdb.dbo.backupset bs
+            JOIN sys.databases d ON d.name = bs.database_name
+            WHERE {db_cond}
+            ORDER BY bs.backup_finish_date DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #48: 48. Databases Without Recent Full Backup
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_databases_without_recent_full_backup()
+Headers     : Database Name, Last Full Backup
+Description : Identifies databases with no recorded full backup or no full backup within the selected assessment window.
+
+SQL Query / Implementation:
+```python
+def get_databases_without_recent_full_backup(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('d.name')
+        query = f"""
+            SELECT
+                d.name AS database_name,
+                MAX(bs.backup_finish_date) AS last_full_backup
+            FROM sys.databases d
+            LEFT JOIN msdb.dbo.backupset bs
+                ON bs.database_name = d.name
+               AND bs.type = 'D'
+            WHERE {db_cond}
+            GROUP BY d.name
+            HAVING MAX(bs.backup_finish_date) IS NULL
+                OR MAX(bs.backup_finish_date) < DATEADD(DAY, -7, GETDATE())
+            ORDER BY last_full_backup
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #49: 49. Always On Availability Status
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_always_on_availability_status()
+Headers     : Group Name, Replica Server, Role, Operational State, Connected State
+Description : Reviews Always On availability replica health when HADR is configured.
+
+SQL Query / Implementation:
+```python
+def get_always_on_availability_status(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                ag.name AS group_name,
+                ar.replica_server_name AS replica_server,
+                ars.role_desc,
+                ars.operational_state_desc,
+                ars.connected_state_desc
+            FROM sys.availability_groups ag
+            JOIN sys.availability_replicas ar
+                ON ar.group_id = ag.group_id
+            JOIN sys.dm_hadr_availability_replica_states ars
+                ON ars.replica_id = ar.replica_id
+            ORDER BY ag.name, ar.replica_server_name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #50: 50. Always On Database Synchronization
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_always_on_database_synchronization()
+Headers     : Database Name, Replica Server, Synchronization State, Synchronization Health
+Description : Reviews database-level Always On synchronization and health.
+
+SQL Query / Implementation:
+```python
+def get_always_on_database_synchronization(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_id_filter('drs.database_id')
+        query = f"""
+            SELECT
+                DB_NAME(drs.database_id) AS database_name,
+                ar.replica_server_name AS replica_server,
+                drs.synchronization_state_desc,
+                drs.synchronization_health_desc
+            FROM sys.dm_hadr_database_replica_states drs
+            JOIN sys.availability_replicas ar
+                ON ar.replica_id = drs.replica_id
+            WHERE {db_cond}
+            ORDER BY database_name, replica_server
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #51: 51. Linked Servers
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_linked_servers()
+Headers     : Server Name, Product, Provider, Data Source, Is Linked
+Description : Inventories configured linked servers and remote data providers.
+
+SQL Query / Implementation:
+```python
+def get_linked_servers(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                name AS server_name,
+                product,
+                provider,
+                data_source,
+                is_linked
+            FROM sys.servers
+            WHERE is_linked = 1
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #52: 52. Server Logins And Roles
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_server_logins_and_roles()
+Headers     : Login Name, Login Type, Is Disabled, Server Role
+Description : Reviews SQL/Windows logins, disabled status, and fixed server-role membership.
+
+SQL Query / Implementation:
+```python
+def get_server_logins_and_roles(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                sp.name AS login_name,
+                sp.type_desc AS login_type,
+                sp.is_disabled,
+                sr.name AS server_role
+            FROM sys.server_principals sp
+            LEFT JOIN sys.server_role_members srm
+                ON srm.member_principal_id = sp.principal_id
+            LEFT JOIN sys.server_principals sr
+                ON sr.principal_id = srm.role_principal_id
+            WHERE sp.type IN ('S','U','G')
+            ORDER BY sp.name, sr.name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #53: 53. Database Owners
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_owners()
+Headers     : Database Name, Owner Name
+Description : Reviews database ownership for governance and security assessment.
+
+SQL Query / Implementation:
+```python
+def get_database_owners(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('d.name')
+        query = f"""
+            SELECT
+                d.name AS database_name,
+                SUSER_SNAME(d.owner_sid) AS owner_name
+            FROM sys.databases d
+            WHERE {db_cond}
+            ORDER BY d.name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #54: 54. Auto Close And Auto Shrink
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_auto_close_and_auto_shrink()
+Headers     : Database Name, Auto Close, Auto Shrink
+Description : Identifies databases configured with AUTO_CLOSE or AUTO_SHRINK.
+
+SQL Query / Implementation:
+```python
+def get_auto_close_and_auto_shrink(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            SELECT
+                name AS database_name,
+                is_auto_close_on,
+                is_auto_shrink_on
+            FROM sys.databases
+            WHERE {db_cond}
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #55: 55. Statistics Inventory
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_statistics_inventory()
+Headers     : Database Name, Schema, Table Name, Statistics Name, Auto Created, User Created, No Recompute
+Description : Inventories table statistics and their creation/recompute properties.
+
+SQL Query / Implementation:
+```python
+def get_statistics_inventory(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                st.name AS statistics_name,
+                st.auto_created,
+                st.user_created,
+                st.no_recompute
+            FROM sys.stats st
+            JOIN sys.tables t ON t.object_id = st.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            ORDER BY s.name, t.name, st.name;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #56: 56. Stale Statistics Candidates
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_stale_statistics_candidates()
+Headers     : Database Name, Schema, Table Name, Statistics Name, Rows, Modification Counter
+Description : Identifies statistics with a high modification counter relative to their recorded row count.
+
+SQL Query / Implementation:
+```python
+def get_stale_statistics_candidates(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql = @sql + N'
+            USE ' + QUOTENAME(name) + N';
+            SELECT TOP (100)
+                DB_NAME() AS database_name,
+                s.name AS schema_name,
+                t.name AS table_name,
+                st.name AS statistics_name,
+                sp.rows,
+                sp.modification_counter
+            FROM sys.stats st
+            JOIN sys.tables t ON t.object_id = st.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            CROSS APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) sp
+            WHERE sp.modification_counter > 0
+            ORDER BY sp.rows DESC;
+            '
+            FROM sys.databases
+            WHERE state_desc = 'ONLINE'
+              AND {db_cond};
+            EXEC sys.sp_executesql @sql;
+        """
+        rows = self._execute_query(query)
+        rows.sort(key=lambda r: int(r.get("rows") or 0), reverse=True)
+        return rows[:100]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #57: 57. Deadlock Extended Events Sessions
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_deadlock_xevent_sessions()
+Headers     : Session Name, Startup State, State
+Description : Checks Extended Events sessions for deadlock monitoring configuration.
+
+SQL Query / Implementation:
+```python
+def get_deadlock_xevent_sessions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                name AS session_name,
+                CASE WHEN startup_state = 1 THEN 'STARTUP_ENABLED' ELSE 'STARTUP_DISABLED' END AS startup_state,
+                CASE WHEN CAST(CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM sys.dm_xe_sessions xs
+                    WHERE xs.name = s.name
+                ) THEN 1 ELSE 0 END AS bit) = 1 THEN 'RUNNING' ELSE 'STOPPED' END AS state_desc
+            FROM sys.server_event_sessions s
+            WHERE name LIKE '%deadlock%'
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #58: 58. Server Configuration
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_server_configuration()
+Headers     : Configuration Name, Value In Use, Minimum, Maximum, Description
+Description : Reviews top 10 key instance-level configuration options and their active values.
+
+SQL Query / Implementation:
+```python
+def get_server_configuration(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT TOP (10)
+                name AS configuration_name,
+                CAST(value_in_use AS BIGINT) AS value_in_use,
+                CAST(minimum AS BIGINT) AS minimum,
+                CAST(maximum AS BIGINT) AS maximum,
+                CAST(description AS NVARCHAR(500)) AS description
+            FROM sys.configurations
+            WHERE LOWER(name) IN (
+                'max server memory (mb)',
+                'min server memory (mb)',
+                'max degree of parallelism',
+                'cost threshold for parallelism',
+                'optimize for ad hoc workloads',
+                'fill factor (%)',
+                'backup compression default',
+                'remote admin connections',
+                'clr enabled',
+                'contained database authentication'
+            )
+            ORDER BY configuration_name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #59: 59. CPU Schedulers
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_cpu_schedulers()
+Headers     : Scheduler ID, Status, CPU ID, Is Online, Is Idle, Current Tasks Count, Runnable Tasks Count
+Description : Shows SQL Server scheduler state and runnable workload indicators.
+
+SQL Query / Implementation:
+```python
+def get_cpu_schedulers(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                scheduler_id,
+                status,
+                cpu_id,
+                is_online,
+                is_idle,
+                current_tasks_count,
+                runnable_tasks_count
+            FROM sys.dm_os_schedulers
+            WHERE status = 'VISIBLE ONLINE'
+            ORDER BY runnable_tasks_count DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #60: 60. Database Health Summary
+--------------------------------------------------------------------------------
+Method Name : SQLServerConnector.get_database_health_summary()
+Headers     : Database Name, State, Recovery Model, Compat Level, User Access, Is Read Only, Auto Close, Auto Shrink, Log Reuse Wait Reason
+Description : Provides a compact operational health summary for user databases.
+
+SQL Query / Implementation:
+```python
+def get_database_health_summary(self) -> List[Dict[str, Any]]:
+        db_cond = self._db_sys_filter('name')
+        query = f"""
+            SELECT
+                name AS database_name,
+                state_desc,
+                recovery_model_desc,
+                compatibility_level,
+                user_access_desc,
+                is_read_only,
+                is_auto_close_on,
+                is_auto_shrink_on,
+                log_reuse_wait_desc
+            FROM sys.databases
+            WHERE {db_cond}
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+

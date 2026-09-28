@@ -1,0 +1,2488 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-[#F7F8FA] text-[#1F2937] antialiased">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Metadata Explorer | Enterprise Database Observability</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Local Chart.js & Lucide (Offline Safe) -->
+    <script src="/static/chart.js"></script>
+    <script src="/static/lucide.js"></script>
+    <!-- Inter Font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            bg: '#F7F8FA',
+                            card: '#FFFFFF',
+                            text: '#1F2937',
+                            muted: '#6B7280',
+                            border: '#E5E7EB',
+                            primary: '#2563EB',
+                            success: '#16A34A',
+                            warning: '#D97706',
+                            danger: '#DC2626',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #F7F8FA; color: #1F2937; }
+        .enterprise-card {
+            background-color: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+            transition: all 0.2s ease-in-out;
+        }
+        .enterprise-card:hover {
+            border-color: #CBD5E1;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
+        }
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #F1F5F9; }
+        ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+    </style>
+</head>
+<body class="h-full flex flex-col bg-[#F7F8FA]">
+
+    <!-- Top Header Navigation -->
+    <header class="sticky top-0 z-40 w-full border-b border-[#E5E7EB] bg-white shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            
+            <!-- Brand & Title -->
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-blue-50 text-blue-600 rounded-lg border border-blue-100">
+                    <i data-lucide="database" class="w-5 h-5"></i>
+                </div>
+                <div>
+                    <h1 class="text-base font-bold text-[#1F2937] tracking-tight">
+                        Database Metadata Explorer
+                    </h1>
+                    <p class="text-xs text-[#6B7280] font-medium">Enterprise Database Analytics & Health Dashboard</p>
+                </div>
+            </div>
+
+            <!-- Connected DB Controls -->
+            <div class="flex items-center gap-3">
+                <div id="statusBadge" class="hidden items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 border border-emerald-200 text-emerald-700">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                    <span id="statusText">Connected: MySQL</span>
+                </div>
+
+                <div id="timeRangeBadge" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-blue-50 border border-blue-200 text-blue-700">
+                    <i data-lucide="calendar-clock" class="w-3.5 h-3.5 text-blue-600"></i>
+                    <span class="text-blue-500 font-normal">Range:</span>
+                    <select id="timeRangeSelect" onchange="onTimeRangeChange(this.value)" class="bg-transparent font-bold text-blue-700 focus:outline-none cursor-pointer">
+                        <option value="15m">Last 15 Minutes</option>
+                        <option value="30m">Last 30 Minutes</option>
+                        <option value="1h" selected>Last 1 Hour</option>
+                        <option value="3h">Last 3 Hours</option>
+                        <option value="6h">Last 6 Hours</option>
+                        <option value="12h">Last 12 Hours</option>
+                        <option value="24h">Last 24 Hours</option>
+                    </select>
+                </div>
+
+                <div id="lastUpdatedBadge" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-100 border border-slate-200 text-slate-600">
+                    <i data-lucide="clock" class="w-3.5 h-3.5 text-slate-400"></i>
+                    <span id="lastUpdatedText">Last Updated: --</span>
+                </div>
+
+                <button id="disconnectBtn" onclick="disconnectDatabase()" class="hidden items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-all">
+                    <i data-lucide="arrow-left-right" class="w-3.5 h-3.5"></i>
+                    <span>Switch DB</span>
+                </button>
+
+                <button id="pdfExportBtn" onclick="exportPdfReport()" class="hidden items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-all border border-blue-700">
+                    <i data-lucide="file-text" class="w-4 h-4"></i>
+                    <span>Export PDF Report</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Tabs Navigation Bar (Appears after successful database connection) -->
+    <div id="tabsContainer" class="hidden bg-white border-b border-[#E5E7EB] shadow-xs">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <nav class="flex space-x-8" aria-label="Dashboard Tabs">
+                <button id="tabBtnDatabase" onclick="switchDashboardTab('database')" class="py-4 px-1 inline-flex items-center gap-2 border-b-2 font-bold text-sm text-blue-600 border-blue-600 focus:outline-none cursor-pointer">
+                    <i data-lucide="activity" class="w-4 h-4"></i>
+                    <span>Database Insights</span>
+                </button>
+                <button id="tabBtnData" onclick="switchDashboardTab('data')" class="py-4 px-1 inline-flex items-center gap-2 border-b-2 font-semibold text-sm text-slate-500 border-transparent hover:text-slate-700 hover:border-slate-300 focus:outline-none cursor-pointer">
+                    <i data-lucide="bar-chart-2" class="w-4 h-4"></i>
+                    <span>Data Insights</span>
+                </button>
+            </nav>
+        </div>
+    </div>
+
+    <!-- Main Body Container -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-2 pb-8">
+
+        <!-- STEP 1: Database Selection Page -->
+        <section id="selectionScreen" class="py-6">
+            <div class="mb-8">
+                <h2 class="text-xl font-bold text-[#1F2937] tracking-tight">
+                    Select Database Engine
+                </h2>
+                <p class="mt-1 text-sm text-[#6B7280]">
+                    Select an enterprise database instance below to connect and inspect operational health metrics, storage footprints, and performance statistics.
+                </p>
+            </div>
+
+            <!-- 4 Clean Database Cards -->
+            <div id="databasesGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+                <!-- Populated dynamically via JS -->
+            </div>
+        </section>
+
+        <!-- STEP 2: Connection Modal -->
+        <div id="credentialsModal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 overflow-y-auto">
+            <div class="bg-white w-full max-w-md rounded-xl p-6 shadow-xl relative border border-slate-200">
+                <!-- Close Button -->
+                <button onclick="closeCredentialsModal()" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+
+                <!-- Modal Header -->
+                <div class="flex items-center gap-3 mb-5">
+                    <div id="modalIconContainer" class="p-2.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-100">
+                        <i data-lucide="database" class="w-5 h-5"></i>
+                    </div>
+                    <div>
+                        <h3 id="modalTitle" class="text-lg font-bold text-[#1F2937]">Connect to Database</h3>
+                        <p id="modalSubtitle" class="text-xs text-[#6B7280]">Enter host parameters and credentials</p>
+                    </div>
+                </div>
+
+                <!-- Error Alert Box -->
+                <div id="modalError" class="hidden mb-4 p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs flex items-start gap-2.5 max-h-52 overflow-y-auto">
+                    <i data-lucide="alert-circle" class="w-4 h-4 shrink-0 mt-0.5 text-red-600"></i>
+                    <div>
+                        <p class="font-bold text-red-900 mb-0.5">Connection Error</p>
+                        <span id="modalErrorText" class="text-red-700 leading-relaxed break-words font-medium">Connection error</span>
+                    </div>
+                </div>
+
+                <!-- Credentials Form -->
+                <form id="credentialsForm" onsubmit="submitCredentials(event)" class="space-y-3.5">
+                    <div id="dynamicFormFields" class="space-y-3.5">
+                        <!-- Dynamic Fields injected here -->
+                    </div>
+
+                    <div class="pt-4 flex items-center gap-2.5 justify-end border-t border-slate-100">
+                        <button type="button" onclick="fillSavedConfig()" class="px-3 py-2 text-xs font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg border border-amber-200 flex items-center gap-1.5 transition-all">
+                            <i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-600"></i>
+                            <span>Pre-fill Saved Config</span>
+                        </button>
+                        <button type="submit" id="connectSubmitBtn" class="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm flex items-center gap-1.5 transition-all">
+                            <span>Connect & Analyze</span>
+                            <i data-lucide="arrow-right" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- STEP 3: Connected Database Observability Dashboard -->
+        <section id="dashboardScreen" class="hidden space-y-6">
+            
+            <!-- DATABASE INSIGHTS TAB VIEW -->
+            <div id="databaseInsightsDashboard" class="space-y-6">
+                <!-- DATABASE HEALTH SUMMARY BANNER -->
+            <div id="healthSummaryCard" class="enterprise-card p-4 bg-white border border-slate-200 rounded-xl shadow-xs">
+                <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <div class="flex items-center gap-2.5">
+                        <div class="p-2 rounded-lg bg-blue-50 text-blue-600 border border-blue-100">
+                            <i data-lucide="activity" class="w-5 h-5"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-extrabold text-[#1F2937] tracking-tight uppercase">DATABASE HEALTH SUMMARY</h3>
+                            <p class="text-xs text-[#6B7280]">Automated operational health and workload assessment</p>
+                        </div>
+                    </div>
+                    <div id="overallStatusBadge" class="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+                        <span id="overallStatusDot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                        <span id="overallStatusText">Healthy</span>
+                    </div>
+                </div>
+                <ul id="healthFindingsList" class="mt-3.5 space-y-2 text-xs text-[#1F2937] font-medium">
+                    <!-- Dynamic findings list -->
+                </ul>
+            </div>
+
+            <!-- Standardized 6 KPI Cards Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+                
+                <!-- KPI 1: CPU Utilization -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>CPU Utilization</span>
+                        <i data-lucide="cpu" class="w-4 h-4 text-blue-600"></i>
+                    </div>
+                    <div id="kpiCpu" class="mt-2 text-xl font-extrabold text-[#1F2937]">14.8%</div>
+                    <div class="mt-1 flex items-center justify-between text-[11px]">
+                        <span id="kpiCpuBadge" class="px-2 py-0.5 rounded font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200">Normal</span>
+                        <span id="kpiCpuSub" class="text-slate-500 text-[10px]">Avg: 12.5%</span>
+                    </div>
+                </div>
+
+                <!-- KPI 2: I/O Operations (IOPS) -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>I/O Operations (IOPS)</span>
+                        <i data-lucide="activity" class="w-4 h-4 text-emerald-600"></i>
+                    </div>
+                    <div id="kpiIops" class="mt-2 text-xl font-extrabold text-[#1F2937]">420</div>
+                    <div class="mt-1 flex items-center justify-between text-[11px]">
+                        <span id="kpiIopsBadge" class="px-2 py-0.5 rounded font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200">Healthy</span>
+                        <span id="kpiIopsSub" class="text-slate-500 text-[10px]">Peak: 540</span>
+                    </div>
+                </div>
+
+                <!-- KPI 3: Active Connections -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>Active Connections</span>
+                        <i data-lucide="users" class="w-4 h-4 text-blue-600"></i>
+                    </div>
+                    <div id="kpiConnections" class="mt-2 text-xl font-extrabold text-[#1F2937]">12</div>
+                    <div class="mt-1 flex items-center justify-between text-[11px]">
+                        <span id="kpiConnBadge" class="px-2 py-0.5 rounded font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200">Normal</span>
+                        <span id="kpiConnSub" class="text-slate-500 text-[10px]">Max: 100</span>
+                    </div>
+                </div>
+
+                <!-- KPI 4: Queries per Second (QPS) -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>Queries / Sec (QPS)</span>
+                        <i data-lucide="zap" class="w-4 h-4 text-amber-600"></i>
+                    </div>
+                    <div id="kpiQps" class="mt-2 text-xl font-extrabold text-[#1F2937]">180</div>
+                    <div id="kpiQpsSub" class="mt-1 text-[11px] text-[#6B7280] font-medium">QPS throughput</div>
+                </div>
+
+                <!-- KPI 5: Database Storage -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>Database Storage</span>
+                        <i data-lucide="hard-drive" class="w-4 h-4 text-purple-600"></i>
+                    </div>
+                    <div id="kpiDbSize" class="mt-2 text-xl font-extrabold text-[#1F2937]">145.2 MB</div>
+                    <div id="kpiTablesCount" class="mt-1 text-[11px] text-[#6B7280] font-medium">78 Tables</div>
+                </div>
+
+                <!-- KPI 6: Blocked Sessions -->
+                <div class="enterprise-card p-4 flex flex-col justify-between">
+                    <div class="flex items-center justify-between text-xs font-semibold text-[#6B7280]">
+                        <span>Blocked Sessions</span>
+                        <i data-lucide="shield-alert" class="w-4 h-4 text-emerald-600"></i>
+                    </div>
+                    <div id="kpiBlockingCount" class="mt-2 text-xl font-extrabold text-[#1F2937]">0</div>
+                    <div class="mt-1 text-[11px] font-semibold text-emerald-600" id="kpiBlockingText">No Blocking</div>
+                </div>
+            </div>
+
+            <!-- Standardized 4 Analytics Performance & Workload Charts Section -->
+            <!-- Row 1: CPU Analytical Pair (CPU Utilization & Top CPU Queries) -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                
+                <!-- CPU Utilization (Time-Series Line) -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="cpu" class="w-4 h-4 text-blue-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">CPU Utilization</h3>
+                            </div>
+                            <span id="cpuTrendBadgeText" class="text-[11px] font-semibold text-[#6B7280]">Scale 0–100% (Last 1 Hour)</span>
+                        </div>
+                        <div class="h-56 relative w-full">
+                            <canvas id="cpuTrendChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-blue-600 shrink-0"></i>
+                        <span id="insight_cpu_trend">CPU utilization is in the normal range.</span>
+                    </div>
+                </div>
+
+                <!-- Top CPU-Consuming Queries (Horizontal Ranked Bars) -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="terminal" class="w-4 h-4 text-blue-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">Top CPU-Consuming Queries</h3>
+                            </div>
+                            <span id="topCpuBadgeText" class="text-[11px] font-semibold text-[#6B7280]">CPU Time (ms) (Last 1 Hour)</span>
+                        </div>
+                        <div class="h-56 relative w-full flex items-center justify-center">
+                            <canvas id="topCpuQueriesChart"></canvas>
+                            <div id="topCpuQueriesEmpty" class="hidden text-xs text-slate-400 italic">No active query workload detected.</div>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-blue-600 shrink-0"></i>
+                        <span id="insight_top_cpu">No active query workload detected.</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Row 2: I/O Analytical Pair (I/O Operations & Top I/O Tables/Objects) -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                
+                <!-- I/O Operations (IOPS) (Time-Series Line) -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="activity" class="w-4 h-4 text-emerald-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">I/O Operations (IOPS)</h3>
+                            </div>
+                            <span id="ioTrendBadgeText" class="text-[11px] font-semibold text-[#6B7280]">IOPS Activity (Last 1 Hour)</span>
+                        </div>
+                        <div class="h-56 relative w-full">
+                            <canvas id="ioTrendChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-emerald-600 shrink-0"></i>
+                        <span id="insight_io_trend">I/O activity is operating at healthy levels.</span>
+                    </div>
+                </div>
+
+                <!-- Top I/O-Consuming Tables / Objects (Compact Proportional Ranking Visual) -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="hard-drive" class="w-4 h-4 text-sky-600"></i>
+                                <h3 id="topIoCardTitle" class="text-sm font-bold text-[#1F2937]">Top I/O-Consuming Tables / Objects</h3>
+                            </div>
+                            <span id="topIoBadgeText" class="text-[11px] font-semibold text-[#6B7280]">I/O Activity (Last 1 Hour)</span>
+                        </div>
+                        <div class="h-56 relative w-full overflow-y-auto pr-1" id="topIoContainer">
+                            <div id="topIoQueriesEmpty" class="text-xs text-slate-400 italic text-center pt-20">No I/O activity data available.</div>
+                            <div id="topIoRankingList" class="space-y-2"></div>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-sky-600 shrink-0"></i>
+                        <span id="insight_top_io">No I/O activity data available.</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Row 3: Top Wait Events & Buffer Pool / Cache Efficiency -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                
+                <!-- Wait Events -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="hourglass" class="w-4 h-4 text-amber-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">Top Wait Events</h3>
+                            </div>
+                            <span id="waitStatsBadgeText" class="text-[11px] font-semibold text-[#6B7280]">Wait Events (Last 1 Hour)</span>
+                        </div>
+                        <div class="h-56 relative w-full flex items-center justify-center">
+                            <canvas id="waitStatsChart"></canvas>
+                            <div id="waitStatsEmpty" class="hidden text-xs text-slate-400 italic">No significant wait events detected.</div>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-600 shrink-0"></i>
+                        <span id="insight_wait_events">No significant wait events detected.</span>
+                    </div>
+                </div>
+
+                <!-- Buffer Pool / Cache Efficiency -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="database" class="w-4 h-4 text-purple-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">Buffer Pool / Cache Efficiency</h3>
+                            </div>
+                            <span class="text-[11px] font-semibold text-emerald-600" id="cacheBadgeText">Healthy</span>
+                        </div>
+                        <div class="h-56 relative w-full flex items-center justify-center">
+                            <canvas id="cacheGaugeChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-purple-600 shrink-0"></i>
+                        <span>Cache Hit Ratio: <span class="font-bold text-[#1F2937]" id="cacheRatioText">99.4%</span></span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Row 4: Data vs Index Storage & Top 10 Largest Tables -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                
+                <!-- Storage Donut Chart -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="pie-chart" class="w-4 h-4 text-blue-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">Data vs Index Storage</h3>
+                            </div>
+                        </div>
+                        <div class="h-56 relative w-full flex items-center justify-center">
+                            <canvas id="storagePieChart"></canvas>
+                            <div id="storagePieEmpty" class="hidden text-xs text-slate-400 italic">Index storage data unavailable.</div>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-blue-600 shrink-0"></i>
+                        <span id="insight_storage_breakdown">Data vs index storage breakdown across schemas.</span>
+                    </div>
+                </div>
+
+                <!-- Top 10 Largest Tables Bar Chart -->
+                <div class="enterprise-card p-5 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="bar-chart-2" class="w-4 h-4 text-blue-600"></i>
+                                <h3 class="text-sm font-bold text-[#1F2937]">Top 10 Largest Tables</h3>
+                            </div>
+                            <span class="text-[11px] font-semibold text-[#6B7280]">Size (MB / GB)</span>
+                        </div>
+                        <div class="h-56 relative w-full flex items-center justify-center">
+                            <canvas id="topTablesBarChart"></canvas>
+                            <div id="topTablesEmpty" class="hidden text-xs text-slate-400 italic">No table storage data available.</div>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-blue-600 shrink-0"></i>
+                        <span id="insight_top_tables">No table storage data available.</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Row 5: Detailed Metadata Reports & Insights Explorer -->
+            <div class="enterprise-card p-6">
+                <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <h3 class="text-base font-bold text-[#1F2937]">Metadata Reports & Schema Explorer</h3>
+                        <p class="text-xs text-[#6B7280]">Filter and inspect schema structures, index inventories, and operational metrics</p>
+                    </div>
+
+                    <!-- Search Input -->
+                    <div class="relative w-full md:w-80">
+                        <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                        <input type="text" id="insightSearch" oninput="filterInsights()" placeholder="Search insights or table names..." class="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-4 py-2 text-xs text-[#1F2937] placeholder-slate-400 focus:outline-none focus:border-blue-600 focus:bg-white transition-colors">
+                    </div>
+                </div>
+
+                <!-- Insights Cards Container -->
+                <div id="insightsContainer" class="space-y-3">
+                    <!-- Dynamic Insight Cards injected here -->
+                </div>
+            </div>
+            </div>
+            <!-- END OF DATABASE INSIGHTS TAB VIEW -->
+
+            <!-- DATA INSIGHTS TAB VIEW -->
+            <div id="dataInsightsDashboard" class="hidden space-y-6">
+                <!-- Controls Bar -->
+                <div class="enterprise-card p-4 bg-white border border-slate-200 rounded-xl shadow-xs">
+                    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                            <h3 class="text-base font-bold text-[#1F2937] tracking-tight flex items-center gap-2">
+                                <i data-lucide="bar-chart-2" class="w-5 h-5 text-blue-600"></i>
+                                <span>Data Insights Profiling & Quality Analysis</span>
+                            </h3>
+                            <p class="text-xs text-[#6B7280]">Select a table from the connected database engine to inspect distributions, anomalies, duplicates, and missing values.</p>
+                        </div>
+
+                        <!-- Selectors -->
+                        <div class="flex flex-wrap items-center gap-3">
+                            <!-- Database Selector -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-xs font-semibold text-slate-600">Database:</label>
+                                <select id="diDatabaseSelect" onchange="onDiDatabaseChange(this.value)" class="bg-slate-50 border border-slate-300 text-slate-800 text-xs font-medium rounded-lg p-2 focus:ring-blue-500 focus:border-blue-500">
+                                    <option value="">Select Database</option>
+                                </select>
+                            </div>
+
+                            <!-- Schema Selector -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-xs font-semibold text-slate-600">Schema:</label>
+                                <select id="diSchemaSelect" onchange="onDiSchemaChange(this.value)" class="bg-slate-50 border border-slate-300 text-slate-800 text-xs font-medium rounded-lg p-2 focus:ring-blue-500 focus:border-blue-500">
+                                    <option value="">Select Schema</option>
+                                </select>
+                            </div>
+
+                            <!-- Table Selector -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-xs font-semibold text-slate-600">Table:</label>
+                                <select id="diTableSelect" onchange="onDiTableSelectChange()" class="bg-slate-50 border border-slate-300 text-slate-800 text-xs font-medium rounded-lg p-2 focus:ring-blue-500 focus:border-blue-500">
+                                    <option value="">Select Table</option>
+                                </select>
+                            </div>
+
+                            <!-- Sample Limit Selector -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-xs font-semibold text-slate-600">Sample Limit:</label>
+                                <select id="diLimitSelect" class="bg-slate-50 border border-slate-300 text-slate-800 text-xs font-medium rounded-lg p-2 focus:ring-blue-500 focus:border-blue-500">
+                                    <option value="100">Top 100 Rows (Fastest)</option>
+                                    <option value="500">Top 500 Rows</option>
+                                    <option value="1000" selected>Top 1,000 Rows (Recommended)</option>
+                                    <option value="5000">Top 5,000 Rows</option>
+                                    <option value="10000">Top 10,000 Rows</option>
+                                    <option value="0">All Rows (Full Table Scan)</option>
+                                </select>
+                            </div>
+
+                            <!-- Analyze Button -->
+                            <button id="diAnalyzeBtn" onclick="runDataProfiling()" class="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs flex items-center gap-2 transition-all cursor-pointer">
+                                <i data-lucide="play" class="w-4 h-4"></i>
+                                <span>Analyze Data</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Empty State -->
+                <div id="diEmptyState" class="enterprise-card p-12 bg-white border border-slate-200 rounded-xl shadow-xs text-center space-y-3">
+                    <div class="inline-flex p-4 rounded-full bg-blue-50 text-blue-600 mb-2">
+                        <i data-lucide="table-properties" class="w-10 h-10"></i>
+                    </div>
+                    <h3 class="text-lg font-bold text-[#1F2937]">DATA INSIGHTS</h3>
+                    <p class="text-sm text-[#6B7280] max-w-md mx-auto">Select a database, schema, and table above, then click <b>Analyze Data</b> to begin data profiling, anomaly detection, and quality analysis.</p>
+                </div>
+
+                <!-- Loading State -->
+                <div id="diLoadingState" class="hidden enterprise-card p-12 bg-white border border-slate-200 rounded-xl shadow-xs text-center space-y-4">
+                    <div class="inline-block animate-spin rounded-full h-10 w-10 border-4 border-blue-600 border-t-transparent"></div>
+                    <h4 class="text-base font-bold text-slate-800">Profiling selected dataset...</h4>
+                    <p class="text-xs text-slate-500">Evaluating schema types, null distribution, duplicates, inconsistencies, and anomaly heuristics.</p>
+                </div>
+
+                <!-- Results Container -->
+                <div id="diResultsContainer" class="hidden space-y-6">
+                    
+                    <!-- Summary KPI Cards -->
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div class="enterprise-card p-4 bg-white rounded-xl flex items-center gap-4">
+                            <div class="p-3 rounded-lg bg-blue-50 text-blue-600">
+                                <i data-lucide="rows" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <p class="text-xs font-semibold text-slate-500">Total Rows</p>
+                                <h3 id="diKpiRows" class="text-xl font-extrabold text-slate-800">--</h3>
+                            </div>
+                        </div>
+
+                        <div class="enterprise-card p-4 bg-white rounded-xl flex items-center gap-4">
+                            <div class="p-3 rounded-lg bg-indigo-50 text-indigo-600">
+                                <i data-lucide="columns" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <p class="text-xs font-semibold text-slate-500">Total Columns</p>
+                                <h3 id="diKpiCols" class="text-xl font-extrabold text-slate-800">--</h3>
+                            </div>
+                        </div>
+
+                        <div class="enterprise-card p-4 bg-white rounded-xl flex items-center gap-4">
+                            <div class="p-3 rounded-lg bg-amber-50 text-amber-600">
+                                <i data-lucide="alert-circle" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <p class="text-xs font-semibold text-slate-500">Missing Data Cells</p>
+                                <h3 id="diKpiMissing" class="text-xl font-extrabold text-amber-700">--</h3>
+                                <p id="diKpiMissingSub" class="text-[11px] text-slate-500">--% missing</p>
+                            </div>
+                        </div>
+
+                        <div class="enterprise-card p-4 bg-white rounded-xl flex items-center gap-4">
+                            <div class="p-3 rounded-lg bg-red-50 text-red-600">
+                                <i data-lucide="copy" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <p class="text-xs font-semibold text-slate-500">Duplicate Extra Records</p>
+                                <h3 id="diKpiDuplicates" class="text-xl font-extrabold text-red-700">--</h3>
+                                <p id="diKpiDuplicatesSub" class="text-[11px] text-slate-500">--% duplicates</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 8 Dynamic Charts Grid -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        
+                        <!-- Chart 1: Missing Values by Column -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="bar-chart" class="w-4 h-4 text-blue-600"></i>
+                                <span>Missing Values by Column</span>
+                            </h4>
+                            <div class="h-64 relative">
+                                <canvas id="diMissingChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 2: Data Quality Overview -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="pie-chart" class="w-4 h-4 text-blue-600"></i>
+                                <span>Data Quality Overview</span>
+                            </h4>
+                            <div class="h-64 relative">
+                                <canvas id="diQualityOverviewChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 3: Unique vs Duplicate Records -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="copy" class="w-4 h-4 text-blue-600"></i>
+                                <span>Unique vs Duplicate Records</span>
+                            </h4>
+                            <div class="h-64 relative">
+                                <canvas id="diRecordDuplicatesChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 4: Semantic Type Distribution -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="layers" class="w-4 h-4 text-blue-600"></i>
+                                <span>Semantic Type Distribution</span>
+                            </h4>
+                            <div class="h-64 relative">
+                                <canvas id="diSemanticDistributionChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Chart 5: Numeric Distribution Summary -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="trending-up" class="w-4 h-4 text-blue-600"></i>
+                                <span>Numeric Features (Mean vs Median)</span>
+                            </h4>
+                            <div class="h-64 relative flex items-center justify-center">
+                                <canvas id="diNumericDistributionChart"></canvas>
+                                <div id="diNumericDistributionEmpty" class="hidden text-xs text-slate-400 italic">No numeric columns available in selected dataset sample.</div>
+                            </div>
+                        </div>
+
+                        <!-- Chart 6: Categorical Distribution -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="list" class="w-4 h-4 text-blue-600"></i>
+                                <span>Top Categorical Distributions</span>
+                            </h4>
+                            <div class="h-64 relative">
+                                <canvas id="diCategoricalDistributionChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Card 7: Confirmed Inconsistencies -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="shield-alert" class="w-4 h-4 text-amber-600"></i>
+                                <span>Confirmed Inconsistencies</span>
+                            </h4>
+                            <div id="diInconsistenciesList" class="h-64 overflow-y-auto text-xs space-y-2 p-1">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
+
+                        <!-- Card 8: Potential Anomalies -->
+                        <div class="enterprise-card p-5 bg-white rounded-xl flex flex-col justify-between">
+                            <h4 class="text-xs font-extrabold text-[#1F2937] uppercase mb-2 flex items-center gap-2">
+                                <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600"></i>
+                                <span>Potential Anomalies</span>
+                            </h4>
+                            <div id="diAnomaliesList" class="h-64 overflow-y-auto text-xs space-y-2 p-1">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Column Profiling Table -->
+                    <div class="enterprise-card p-5 bg-white rounded-xl shadow-xs">
+                        <h4 class="text-sm font-extrabold text-[#1F2937] uppercase mb-3 flex items-center gap-2">
+                            <i data-lucide="table" class="w-4 h-4 text-blue-600"></i>
+                            <span>Column Profiling & Semantic Types</span>
+                        </h4>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs border-collapse">
+                                <thead>
+                                    <tr class="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold uppercase">
+                                        <th class="py-2.5 px-3">Column</th>
+                                        <th class="py-2.5 px-3">Physical Type</th>
+                                        <th class="py-2.5 px-3">Semantic Type</th>
+                                        <th class="py-2.5 px-3">Null Count</th>
+                                        <th class="py-2.5 px-3">Missing %</th>
+                                        <th class="py-2.5 px-3">Distinct Count</th>
+                                        <th class="py-2.5 px-3">Summary Stats</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="diColumnProfilingTableBody" class="divide-y divide-slate-100 font-medium text-slate-800">
+                                    <!-- Rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Imputation Recommendations Table -->
+                    <div class="enterprise-card p-5 bg-white rounded-xl shadow-xs">
+                        <h4 class="text-sm font-extrabold text-[#1F2937] uppercase mb-3 flex items-center gap-2">
+                            <i data-lucide="sparkles" class="w-4 h-4 text-amber-600"></i>
+                            <span>Imputation Recommendations</span>
+                        </h4>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs border-collapse">
+                                <thead>
+                                    <tr class="bg-amber-50 border-b border-amber-200 text-amber-900 font-bold uppercase">
+                                        <th class="py-2.5 px-3">Column</th>
+                                        <th class="py-2.5 px-3">Missing Count</th>
+                                        <th class="py-2.5 px-3">Recommended Method</th>
+                                        <th class="py-2.5 px-3">Reason / Strategy</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="diImputationTableBody" class="divide-y divide-slate-100 font-medium text-slate-800">
+                                    <!-- Rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- END OF DATA INSIGHTS TAB VIEW -->
+        </section>
+
+    </main>
+
+    <!-- Enterprise Footer -->
+    <footer class="mt-auto border-t border-slate-200 bg-white py-4 text-center text-xs text-[#6B7280]">
+        Database Metadata Explorer &copy; 2026 | Enterprise Database Observability Platform
+    </footer>
+
+    <!-- App JavaScript Logic -->
+    <script>
+        // Global App State
+        let supportedDatabases = [];
+        let savedConfigs = {};
+        let selectedDb = null;
+        let currentCredentials = {};
+        let reportsData = [];
+        let currentChartsData = null;
+        let selectedTimeRange = "1h";
+
+        async function onTimeRangeChange(val) {
+            selectedTimeRange = val;
+            if (selectedDb && currentCredentials && Object.keys(currentCredentials).length > 0) {
+                try {
+                    const res = await fetch("/api/insights", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            database_type: selectedDb.id,
+                            credentials: currentCredentials,
+                            time_range: selectedTimeRange
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        renderDashboard(data);
+                    }
+                } catch (err) {
+                    console.error("Failed updating time range insights:", err);
+                }
+            } else if (currentChartsData) {
+                renderAllCharts(currentChartsData);
+            }
+        }
+
+        // Chart Instances
+        let cpuTrendInstance = null;
+        let ioTrendInstance = null;
+        let cpuQueriesInstance = null;
+        let ioQueriesInstance = null;
+        let waitStatsInstance = null;
+        let cacheGaugeInstance = null;
+        let storagePieInstance = null;
+        let topTablesBarInstance = null;
+
+        // On DOM Load
+        document.addEventListener("DOMContentLoaded", async () => {
+            if (window.lucide) lucide.createIcons();
+            await fetchSupportedDatabases();
+            await fetchSavedConfigs();
+        });
+
+        async function fetchSupportedDatabases() {
+            try {
+                const res = await fetch("/api/databases");
+                const data = await res.json();
+                supportedDatabases = data.databases || [];
+                renderDatabaseGrid();
+            } catch (err) {
+                console.error("Error fetching databases:", err);
+            }
+        }
+
+        async function fetchSavedConfigs() {
+            try {
+                const res = await fetch("/api/saved-config");
+                const data = await res.json();
+                savedConfigs = data.saved_config || {};
+            } catch (err) {
+                console.error("Error loading saved configs:", err);
+            }
+        }
+
+        function renderDatabaseGrid() {
+            const grid = document.getElementById("databasesGrid");
+            grid.innerHTML = "";
+
+            supportedDatabases.forEach(db => {
+                const card = document.createElement("div");
+                card.className = "enterprise-card p-5 flex flex-col justify-between cursor-pointer group";
+                card.onclick = () => openCredentialsModal(db.id);
+
+                card.innerHTML = `
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="p-2.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-100">
+                                <i data-lucide="${db.icon || 'database'}" class="w-6 h-6"></i>
+                            </div>
+                            <span class="text-[11px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                                Port ${db.default_port}
+                            </span>
+                        </div>
+                        <h3 class="text-base font-bold text-[#1F2937] group-hover:text-blue-600 transition-colors">${db.name}</h3>
+                        <p class="text-xs text-[#6B7280] mt-1.5 leading-relaxed">${db.description}</p>
+                    </div>
+
+                    <div class="mt-5 pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-blue-600 group-hover:text-blue-700">
+                        <span>Configure Connection</span>
+                        <i data-lucide="chevron-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function openCredentialsModal(dbId) {
+            selectedDb = supportedDatabases.find(d => d.id === dbId);
+            if (!selectedDb) return;
+
+            document.getElementById("modalTitle").innerText = `Connect to ${selectedDb.name}`;
+            document.getElementById("modalSubtitle").innerText = `Provide login parameters for ${selectedDb.name}`;
+            document.getElementById("modalError").classList.add("hidden");
+
+            const fieldsContainer = document.getElementById("dynamicFormFields");
+            fieldsContainer.innerHTML = "";
+
+            selectedDb.fields.forEach(field => {
+                const wrapper = document.createElement("div");
+                const isPassword = field.toLowerCase() === "password";
+                const isOptional = field === "schema" || field === "database";
+
+                let placeholder = `Enter ${field}`;
+                if (field === "host") placeholder = "localhost";
+                if (field === "port") placeholder = String(selectedDb.default_port);
+                if (field === "database") placeholder = "Optional (or blank for all)";
+                if (field === "schema") placeholder = selectedDb.id === "SQL Server" ? "dbo" : "PUBLIC";
+
+                wrapper.innerHTML = `
+                    <label class="block text-xs font-semibold text-[#1F2937] uppercase tracking-wider mb-1">
+                        ${field.replace("_", " ")} ${isOptional ? '<span class="text-slate-400 lowercase font-normal">(optional)</span>' : '*'}
+                    </label>
+                    <input type="${isPassword ? 'password' : 'text'}" 
+                           name="${field}" 
+                           id="input_${field}"
+                           placeholder="${placeholder}"
+                           ${!isOptional ? 'required' : ''}
+                           class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-[#1F2937] focus:outline-none focus:border-blue-600 focus:bg-white transition-colors" />
+                `;
+                fieldsContainer.appendChild(wrapper);
+            });
+
+            document.getElementById("credentialsModal").classList.remove("hidden");
+        }
+
+        function closeCredentialsModal() {
+            document.getElementById("credentialsModal").classList.add("hidden");
+        }
+
+        function fillSavedConfig() {
+            if (!selectedDb || !savedConfigs[selectedDb.id]) return;
+            const dbSaved = savedConfigs[selectedDb.id];
+
+            selectedDb.fields.forEach(field => {
+                const input = document.getElementById(`input_${field}`);
+                if (input && dbSaved[field] !== undefined) {
+                    input.value = dbSaved[field];
+                }
+            });
+        }
+
+        async function submitCredentials(e) {
+            e.preventDefault();
+            const form = document.getElementById("credentialsForm");
+            const formData = new FormData(form);
+            const creds = {};
+
+            formData.forEach((val, key) => {
+                if (val.trim() !== "") creds[key] = val.trim();
+            });
+
+            currentCredentials = creds;
+
+            const submitBtn = document.getElementById("connectSubmitBtn");
+            const modalError = document.getElementById("modalError");
+            const modalErrorText = document.getElementById("modalErrorText");
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Connecting...`;
+            modalError.classList.add("hidden");
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const connRes = await fetch("/api/connect", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        database_type: selectedDb.id,
+                        credentials: creds
+                    })
+                });
+
+                const connData = await connRes.json();
+
+                if (!connRes.ok || !connData.success) {
+                    throw new Error(connData.detail || "Connection failed. Verify host, port, user and password.");
+                }
+
+                submitBtn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Loading Dashboard...`;
+                if (window.lucide) lucide.createIcons();
+
+                const insightsRes = await fetch("/api/insights", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        database_type: selectedDb.id,
+                        credentials: creds,
+                        time_range: selectedTimeRange
+                    })
+                });
+
+                const insightsData = await insightsRes.json();
+
+                if (!insightsRes.ok || !insightsData.success) {
+                    throw new Error(insightsData.detail || "Failed retrieving database insights.");
+                }
+
+                closeCredentialsModal();
+                renderDashboard(insightsData);
+
+            } catch (err) {
+                modalErrorText.innerText = err.message;
+                modalError.classList.remove("hidden");
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = `<span>Connect & Analyze</span><i data-lucide="arrow-right" class="w-4 h-4"></i>`;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        function getStatusBadgeStyle(status) {
+            const st = (status || "").toLowerCase();
+            if (st === "critical" || st === "high") {
+                return { bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500", classStr: "px-2 py-0.5 rounded font-semibold text-red-700 bg-red-50 border border-red-200" };
+            } else if (st === "elevated" || st === "needs attention") {
+                return { bg: "bg-amber-50", text: "text-amber-700", border: "border-amber-200", dot: "bg-amber-500", classStr: "px-2 py-0.5 rounded font-semibold text-amber-700 bg-amber-50 border border-amber-200" };
+            }
+            return { bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", dot: "bg-emerald-500", classStr: "px-2 py-0.5 rounded font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200" };
+        }
+
+        function renderDashboard(data) {
+            reportsData = data.reports || [];
+            const charts = data.charts || {};
+            currentChartsData = charts;
+            const kpis = charts.summary_kpis || {};
+            const health = charts.health_summary || {};
+            const insights = charts.insights || {};
+
+            // Header indicators
+            document.getElementById("statusText").innerText = `Connected: ${data.database_type}`;
+            document.getElementById("statusBadge").classList.remove("hidden");
+            document.getElementById("statusBadge").classList.add("flex");
+
+            if (document.getElementById("timeRangeBadge")) {
+                document.getElementById("timeRangeBadge").classList.remove("hidden");
+                document.getElementById("timeRangeBadge").classList.add("flex");
+            }
+
+            if (charts.last_updated) {
+                document.getElementById("lastUpdatedText").innerText = `Last Updated: ${charts.last_updated}`;
+                document.getElementById("lastUpdatedBadge").classList.remove("hidden");
+                document.getElementById("lastUpdatedBadge").classList.add("flex");
+            }
+
+            document.getElementById("pdfExportBtn").classList.remove("hidden");
+            document.getElementById("pdfExportBtn").classList.add("flex");
+            document.getElementById("disconnectBtn").classList.remove("hidden");
+
+            document.getElementById("selectionScreen").classList.add("hidden");
+            document.getElementById("dashboardScreen").classList.remove("hidden");
+            if (document.getElementById("tabsContainer")) {
+                document.getElementById("tabsContainer").classList.remove("hidden");
+            }
+
+            switchDashboardTab("database");
+            initDataInsightsSelectors();
+
+            if (document.getElementById("topIoCardTitle")) {
+                document.getElementById("topIoCardTitle").innerText = charts.top_io_title || "Top I/O-Consuming Queries";
+            }
+
+            // Database Health Summary Card
+            const overallSt = health.overall_status || "Healthy";
+            const overallStyle = getStatusBadgeStyle(overallSt);
+            const overallBadgeElem = document.getElementById("overallStatusBadge");
+            if (overallBadgeElem) {
+                overallBadgeElem.className = `px-3 py-1 rounded-full text-xs font-bold ${overallStyle.bg} ${overallStyle.text} border ${overallStyle.border} flex items-center gap-1.5`;
+                document.getElementById("overallStatusDot").className = `w-2 h-2 rounded-full ${overallStyle.dot}`;
+                document.getElementById("overallStatusText").innerText = overallSt;
+            }
+
+            const findingsListElem = document.getElementById("healthFindingsList");
+            if (findingsListElem && health.findings) {
+                findingsListElem.innerHTML = health.findings.map(f => {
+                    let iconName = "check-circle";
+                    let iconColor = "text-emerald-600";
+                    if (f.startsWith("Critical:")) { iconName = "alert-octagon"; iconColor = "text-red-600"; }
+                    else if (f.startsWith("High:") || f.includes("elevated") || f.includes("Elevated")) { iconName = "alert-triangle"; iconColor = "text-amber-600"; }
+                    return `<li class="flex items-start gap-2"><i data-lucide="${iconName}" class="w-4 h-4 ${iconColor} shrink-0 mt-0.5"></i><span>${f}</span></li>`;
+                }).join("");
+            }
+
+            // 6 KPI Cards
+            const cpuKpi = kpis.cpu || {};
+            document.getElementById("kpiCpu").innerText = `${cpuKpi.value ?? 14.8}%`;
+            const cpuBadgeElem = document.getElementById("kpiCpuBadge");
+            if (cpuBadgeElem) {
+                cpuBadgeElem.innerText = cpuKpi.status || "Normal";
+                cpuBadgeElem.className = getStatusBadgeStyle(cpuKpi.status).classStr;
+            }
+            const cpuAvgStr = cpuKpi.avg ? (String(cpuKpi.avg).endsWith('%') ? cpuKpi.avg : `${cpuKpi.avg}%`) : '12.5%';
+            const cpuPeakStr = cpuKpi.peak ? (String(cpuKpi.peak).endsWith('%') ? cpuKpi.peak : `${cpuKpi.peak}%`) : '18.0%';
+            document.getElementById("kpiCpuSub").innerText = `Avg: ${cpuAvgStr} | Peak: ${cpuPeakStr}`;
+
+            const iopsKpi = kpis.iops || {};
+            document.getElementById("kpiIops").innerText = `${iopsKpi.value ?? 420}`;
+            const iopsBadgeElem = document.getElementById("kpiIopsBadge");
+            if (iopsBadgeElem) {
+                iopsBadgeElem.innerText = iopsKpi.status || "Healthy";
+                iopsBadgeElem.className = getStatusBadgeStyle(iopsKpi.status).classStr;
+            }
+            document.getElementById("kpiIopsSub").innerText = `Avg: ${iopsKpi.avg || '420'} | Peak: ${iopsKpi.peak || '540'}`;
+
+            const connKpi = kpis.connections || {};
+            document.getElementById("kpiConnections").innerText = `${connKpi.value ?? 12}`;
+            const connBadgeElem = document.getElementById("kpiConnBadge");
+            if (connBadgeElem) {
+                connBadgeElem.innerText = connKpi.status || "Normal";
+                connBadgeElem.className = getStatusBadgeStyle(connKpi.status).classStr;
+            }
+            document.getElementById("kpiConnSub").innerText = `Max: ${connKpi.max_connections || 100}`;
+
+            const qpsKpi = kpis.qps || {};
+            document.getElementById("kpiQps").innerText = `${qpsKpi.value ?? 180}`;
+            if (document.getElementById("kpiQpsSub")) {
+                document.getElementById("kpiQpsSub").innerText = qpsKpi.total_queries ? `${qpsKpi.total_queries} queries` : 'QPS throughput';
+            }
+
+            const storageKpi = kpis.storage || {};
+            document.getElementById("kpiDbSize").innerText = storageKpi.value || "N/A";
+            const tableCntStr = `${storageKpi.table_count ?? reportsData.length} Tables`;
+            document.getElementById("kpiTablesCount").innerText = storageKpi.growth ? `${tableCntStr} | ${storageKpi.growth}` : tableCntStr;
+
+            const blockedKpi = kpis.blocked_sessions || {};
+            const blockedCnt = blockedKpi.count ?? 0;
+            document.getElementById("kpiBlockingCount").innerText = `${blockedCnt}`;
+            const blockedTextElem = document.getElementById("kpiBlockingText");
+            if (blockedTextElem) {
+                if (blockedCnt > 0) {
+                    const peakStr = blockedKpi.peak_count ? ` (Peak: ${blockedKpi.peak_count})` : '';
+                    blockedTextElem.innerText = `${blockedKpi.status_text || blockedCnt + ' Sessions Blocked'}${peakStr}`;
+                    blockedTextElem.className = "mt-1 text-[11px] font-semibold text-red-600";
+                } else {
+                    blockedTextElem.innerText = `No Blocking (${blockedKpi.period_str || selectedTimeRange})`;
+                    blockedTextElem.className = "mt-1 text-[11px] font-semibold text-emerald-600";
+                }
+            }
+
+            // Dynamic Chart Insights Callouts
+            if (document.getElementById("insight_cpu_trend")) document.getElementById("insight_cpu_trend").innerText = insights.cpu_trend || "CPU utilization trend analyzed.";
+            if (document.getElementById("insight_io_trend")) document.getElementById("insight_io_trend").innerText = insights.io_trend || "I/O operations trend analyzed.";
+            if (document.getElementById("insight_top_cpu")) document.getElementById("insight_top_cpu").innerText = insights.top_cpu || "Metric unavailable for this database/configuration.";
+            if (document.getElementById("insight_top_io")) document.getElementById("insight_top_io").innerText = insights.top_io || "Insufficient workload data for analysis.";
+            if (document.getElementById("insight_wait_events")) document.getElementById("insight_wait_events").innerText = insights.wait_events || "No significant wait events detected.";
+            if (document.getElementById("insight_storage_breakdown")) document.getElementById("insight_storage_breakdown").innerText = insights.storage_breakdown || "Data vs index storage breakdown across schemas.";
+            if (document.getElementById("insight_top_tables")) document.getElementById("insight_top_tables").innerText = insights.top_tables || "No table storage data available.";
+
+            // Allow DOM layout to resolve before initializing charts
+            setTimeout(() => {
+                renderAllCharts(charts);
+                renderInsightsList(reportsData);
+                if (window.lucide) lucide.createIcons();
+                window.dispatchEvent(new Event('resize'));
+            }, 80);
+        }
+
+        function getLastHourTimeLabels(range = selectedTimeRange) {
+            const labels = [];
+            const now = new Date();
+            let intervalMinutes = 5;
+            if (range === "15m") intervalMinutes = 1.25;
+            if (range === "30m") intervalMinutes = 2.5;
+            if (range === "3h") intervalMinutes = 15;
+            if (range === "6h") intervalMinutes = 30;
+            if (range === "12h") intervalMinutes = 60;
+            if (range === "24h") intervalMinutes = 120;
+
+            const roundedMinutes = Math.floor(now.getMinutes() / Math.max(1, Math.floor(intervalMinutes))) * intervalMinutes;
+            const baseTime = new Date(now);
+            baseTime.setMinutes(Math.floor(roundedMinutes), 0, 0);
+
+            for (let i = 11; i >= 0; i--) {
+                const t = new Date(baseTime.getTime() - i * intervalMinutes * 60 * 1000);
+                const hours = String(t.getHours()).padStart(2, '0');
+                const minutes = String(t.getMinutes()).padStart(2, '0');
+                labels.push(`${hours}:${minutes}`);
+            }
+            return labels;
+        }
+
+        function formatFullQueryForTooltip(text, maxLineLen = 55) {
+            if (!text) return [];
+            const str = String(text).replace(/[\r\n\t]+/g, ' ').replace(/^[\s'\"]+|[\s'\"]+$/g, '').trim();
+            if (str.length <= maxLineLen) return [str];
+
+            const rawWords = str.split(' ');
+            const words = [];
+            rawWords.forEach(w => {
+                if (w.length > maxLineLen) {
+                    for (let i = 0; i < w.length; i += maxLineLen) {
+                        words.push(w.substring(i, i + maxLineLen));
+                    }
+                } else {
+                    words.push(w);
+                }
+            });
+
+            const lines = [];
+            let currentLine = '';
+
+            words.forEach(w => {
+                if ((currentLine + ' ' + w).trim().length > maxLineLen) {
+                    if (currentLine) lines.push(currentLine.trim());
+                    currentLine = w;
+                } else {
+                    currentLine += (currentLine ? ' ' : '') + w;
+                }
+            });
+            if (currentLine) lines.push(currentLine.trim());
+            return lines;
+        }
+
+        function renderAllCharts(charts) {
+            if (typeof Chart === 'undefined') {
+                console.error("Chart.js is not loaded.");
+                return;
+            }
+
+            const rangeMap = { "15m": "Last 15 Minutes", "30m": "Last 30 Minutes", "1h": "Last 1 Hour", "3h": "Last 3 Hours", "6h": "Last 6 Hours", "12h": "Last 12 Hours", "24h": "Last 24 Hours" };
+            const rangeText = rangeMap[selectedTimeRange] || "Last 1 Hour";
+
+            const multMap = { "15m": 0.85, "30m": 0.9, "1h": 1.0, "3h": 1.45, "6h": 1.85, "12h": 2.15, "24h": 2.50 };
+            const timeMult = multMap[selectedTimeRange] || 1.0;
+
+            // Update Card Subheaders with Active Time Range
+            if (document.getElementById("cpuTrendBadgeText")) document.getElementById("cpuTrendBadgeText").innerText = `Scale 0–100% (${rangeText})`;
+            if (document.getElementById("ioTrendBadgeText")) document.getElementById("ioTrendBadgeText").innerText = `IOPS Activity (${rangeText})`;
+            if (document.getElementById("topIoCardTitle")) document.getElementById("topIoCardTitle").innerText = charts.top_io_title || "Top I/O-Consuming Queries";
+
+            const dynamicTimeLabels = getLastHourTimeLabels(selectedTimeRange);
+            const kpis = charts.summary_kpis || {};
+
+            // Update KPI Subtitles
+            const rawAvg = kpis.cpu?.avg !== undefined ? kpis.cpu.avg : 0.0;
+            const rawCpuPeak = kpis.cpu?.peak !== undefined ? kpis.cpu.peak : 0.0;
+            if (document.getElementById("kpiCpuSub")) document.getElementById("kpiCpuSub").innerText = `Avg: ${rawAvg}% | Peak: ${rawCpuPeak}%`;
+            const rawIopsAvg = kpis.iops?.avg !== undefined ? kpis.iops.avg : 0;
+            const rawIopsPeak = kpis.iops?.peak !== undefined ? kpis.iops.peak : 0;
+            if (document.getElementById("kpiIopsSub")) document.getElementById("kpiIopsSub").innerText = `Avg: ${rawIopsAvg} | Peak: ${rawIopsPeak}`;
+
+            // 1. CPU Utilization Trend (Time-Series Line Chart)
+            const cpuTrendDataObj = charts.cpu_trend;
+            if (cpuTrendDataObj) {
+                if (document.getElementById("cpuTrendBadgeText")) {
+                    document.getElementById("cpuTrendBadgeText").innerText = cpuTrendDataObj.period_label || `Scale 0–100% (${rangeText})`;
+                }
+                if (document.getElementById("insight_cpu_trend")) {
+                    document.getElementById("insight_cpu_trend").innerText = cpuTrendDataObj.insight;
+                }
+                
+                // Update KPI Card 1 (CPU Utilization)
+                document.getElementById("kpiCpu").innerText = `${cpuTrendDataObj.current}%`;
+                const cpuBadgeElem = document.getElementById("kpiCpuBadge");
+                if (cpuBadgeElem) {
+                    cpuBadgeElem.innerText = cpuTrendDataObj.status;
+                    cpuBadgeElem.className = getStatusBadgeStyle(cpuTrendDataObj.status).classStr;
+                }
+                document.getElementById("kpiCpuSub").innerText = `Avg: ${cpuTrendDataObj.avg}% | Peak: ${cpuTrendDataObj.peak}%`;
+
+                const cpuTrendCtx = document.getElementById("cpuTrendChart");
+                if (cpuTrendCtx) {
+                    if (cpuTrendInstance) cpuTrendInstance.destroy();
+                    cpuTrendInstance = new Chart(cpuTrendCtx.getContext('2d'), {
+                        type: 'line',
+                        data: {
+                            labels: cpuTrendDataObj.labels || dynamicTimeLabels,
+                            datasets: [{
+                                label: 'CPU Usage (%)',
+                                data: cpuTrendDataObj.values,
+                                borderColor: '#2563EB',
+                                backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                fill: true,
+                                tension: 0.35,
+                                pointRadius: 3,
+                                pointHoverRadius: 5
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                x: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { display: false } },
+                                y: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { color: '#E5E7EB' }, min: 0, max: 100 }
+                            },
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: {
+                                    callbacks: {
+                                        title: function(context) {
+                                            return context[0].label;
+                                        },
+                                        label: function(context) {
+                                            return ` CPU Utilization: ${context.parsed.y}%`;
+                                        },
+                                        afterLabel: function(context) {
+                                            return ` Status: ${cpuTrendDataObj.status}`;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            } else {
+                if (document.getElementById("insight_cpu_trend")) {
+                    document.getElementById("insight_cpu_trend").innerText = "CPU utilization data is unavailable for the selected period.";
+                }
+            }
+
+            // 2. I/O Operations (IOPS) Trend (Time-Series Line Chart)
+            const ioTrendDataObj = charts.io_trend;
+            if (ioTrendDataObj) {
+                if (document.getElementById("ioTrendBadgeText")) {
+                    document.getElementById("ioTrendBadgeText").innerText = ioTrendDataObj.period_label || `IOPS Activity (${rangeText})`;
+                }
+                if (document.getElementById("insight_io_trend")) {
+                    document.getElementById("insight_io_trend").innerText = ioTrendDataObj.insight;
+                }
+
+                // Update KPI Card 2 (I/O Operations)
+                document.getElementById("kpiIops").innerText = `${ioTrendDataObj.current}`;
+                const iopsBadgeElem = document.getElementById("kpiIopsBadge");
+                if (iopsBadgeElem) {
+                    iopsBadgeElem.innerText = ioTrendDataObj.status;
+                    iopsBadgeElem.className = getStatusBadgeStyle(ioTrendDataObj.status).classStr;
+                }
+                document.getElementById("kpiIopsSub").innerText = `Avg: ${ioTrendDataObj.avg} | Peak: ${ioTrendDataObj.peak}`;
+
+                const ioTrendCtx = document.getElementById("ioTrendChart");
+                if (ioTrendCtx) {
+                    if (ioTrendInstance) ioTrendInstance.destroy();
+
+                    let allIoVals = [...(ioTrendDataObj.values || [])];
+                    if (ioTrendDataObj.read_values) allIoVals.push(...ioTrendDataObj.read_values);
+                    if (ioTrendDataObj.write_values) allIoVals.push(...ioTrendDataObj.write_values);
+
+                    const maxIo = allIoVals.length > 0 ? Math.max(...allIoVals) : 100;
+                    const yMin = 0;
+                    const yMax = Math.ceil(maxIo * 1.15);
+
+                    const datasets = [];
+                    if (ioTrendDataObj.has_read_write && ioTrendDataObj.read_values && ioTrendDataObj.write_values) {
+                        datasets.push({
+                            label: 'Read IOPS',
+                            data: ioTrendDataObj.read_values,
+                            borderColor: '#0284C7',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1.5,
+                            tension: 0.35,
+                            pointRadius: 2
+                        });
+                        datasets.push({
+                            label: 'Write IOPS',
+                            data: ioTrendDataObj.write_values,
+                            borderColor: '#D97706',
+                            backgroundColor: 'transparent',
+                            borderWidth: 1.5,
+                            tension: 0.35,
+                            pointRadius: 2
+                        });
+                        datasets.push({
+                            label: 'Total IOPS',
+                            data: ioTrendDataObj.values,
+                            borderColor: '#16A34A',
+                            backgroundColor: 'rgba(22, 163, 74, 0.08)',
+                            fill: true,
+                            borderWidth: 2,
+                            tension: 0.35,
+                            pointRadius: 3
+                        });
+                    } else {
+                        datasets.push({
+                            label: 'Total IOPS',
+                            data: ioTrendDataObj.values,
+                            borderColor: '#16A34A',
+                            backgroundColor: 'rgba(22, 163, 74, 0.08)',
+                            fill: true,
+                            borderWidth: 2,
+                            tension: 0.35,
+                            pointRadius: 3
+                        });
+                    }
+
+                    ioTrendInstance = new Chart(ioTrendCtx.getContext('2d'), {
+                        type: 'line',
+                        data: {
+                            labels: ioTrendDataObj.labels || dynamicTimeLabels,
+                            datasets: datasets
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                x: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { display: false } },
+                                y: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { color: '#E5E7EB' }, min: yMin, max: yMax }
+                            },
+                            plugins: {
+                                legend: { display: ioTrendDataObj.has_read_write, position: 'top', labels: { boxWidth: 12, font: { size: 10 } } },
+                                tooltip: {
+                                    callbacks: {
+                                        title: function(context) {
+                                            return context[0].label;
+                                        },
+                                        label: function(context) {
+                                            return ` ${context.dataset.label}: ${context.parsed.y}`;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            } else {
+                if (document.getElementById("insight_io_trend")) {
+                    document.getElementById("insight_io_trend").innerText = "I/O activity data is unavailable for the selected period.";
+                }
+            }
+
+            // 3. Top CPU Queries (Horizontal Bar Chart)
+            const cpuQueriesCtx = document.getElementById("topCpuQueriesChart");
+            const cpuEmptyElem = document.getElementById("topCpuQueriesEmpty");
+            if (cpuQueriesCtx) {
+                if (cpuQueriesInstance) cpuQueriesInstance.destroy();
+                const cpuQueries = charts.cpu_queries || [];
+                const cpuAvailable = charts.cpu_queries_available !== false;
+                const cpuUnit = (cpuQueries.length > 0 && cpuQueries[0].cpu_unit) ? cpuQueries[0].cpu_unit : "ms";
+
+                if (document.getElementById("topCpuBadgeText")) {
+                    document.getElementById("topCpuBadgeText").innerText = `CPU Time (${cpuUnit}) (${rangeText})`;
+                }
+
+                if (!cpuAvailable || cpuQueries.length === 0) {
+                    if (cpuEmptyElem) {
+                        cpuEmptyElem.innerText = charts.cpu_queries_reason || "Metric unavailable for this database/configuration.";
+                        cpuEmptyElem.classList.remove("hidden");
+                    }
+                    cpuQueriesCtx.classList.add("hidden");
+                } else {
+                    if (cpuEmptyElem) cpuEmptyElem.classList.add("hidden");
+                    cpuQueriesCtx.classList.remove("hidden");
+
+                    const cpuLabels = cpuQueries.map(q => q.query || q.query_text);
+                    const cpuFullQueries = cpuQueries.map(q => q.full_query || q.query_text || q.query);
+                    const cpuValues = cpuQueries.map(q => {
+                        const v = q.cpu_time !== undefined ? q.cpu_time : parseFloat(String(q.metric).replace(/[^0-9.]/g, ''));
+                        return isNaN(v) ? 0 : v;
+                    });
+
+                    cpuQueriesInstance = new Chart(cpuQueriesCtx.getContext('2d'), {
+                        type: 'bar',
+                        data: {
+                            labels: cpuLabels,
+                            datasets: [{
+                                label: `CPU Time (${cpuUnit}) (${rangeText})`,
+                                data: cpuValues,
+                                backgroundColor: ['#EF4444', '#F59E0B', '#3B82F6', '#6366F1', '#8B5CF6', '#10B981', '#EC4899', '#06B6D4', '#84CC16', '#F43F5E'],
+                                borderRadius: 6,
+                                maxBarThickness: 18,
+                                barPercentage: 0.65
+                            }]
+                        },
+                        options: {
+                            indexAxis: 'y',
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            interaction: {
+                                mode: 'nearest',
+                                axis: 'y',
+                                intersect: false
+                            },
+                            layout: {
+                                padding: { left: 5, right: 15, top: 5, bottom: 5 }
+                            },
+                            scales: {
+                                x: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { color: '#E5E7EB' }, beginAtZero: true },
+                                y: {
+                                    ticks: {
+                                        color: '#374151',
+                                        font: { size: 10, weight: '500' },
+                                        callback: function(val, index) {
+                                            let label = this.getLabelForValue(val) || '';
+                                            label = label.replace(/^[\s'\"]+|[\s'\"]+$/g, '').replace(/[\r\n\t]+/g, ' ').trim();
+                                            return label.length > 22 ? label.substring(0, 22) + '...' : label;
+                                        }
+                                    },
+                                    grid: { display: false }
+                                }
+                            },
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: {
+                                    padding: 10,
+                                    titleFont: { size: 11, family: 'monospace', weight: 'normal' },
+                                    bodyFont: { size: 11, weight: 'bold' },
+                                    callbacks: {
+                                        title: function(context) {
+                                            const idx = context[0].dataIndex;
+                                            const fullQ = cpuFullQueries[idx] || context[0].label;
+                                            return formatFullQueryForTooltip(fullQ, 55);
+                                        },
+                                        label: function(context) {
+                                            const idx = context.dataIndex;
+                                            const item = cpuQueries[idx] || {};
+                                            const val = context.parsed.x;
+                                            const pctStr = item.cpu_percentage !== undefined ? ` (${item.cpu_percentage}%)` : '';
+                                            const execStr = item.execution_count ? ` | Calls: ${item.execution_count}` : '';
+                                            return ` CPU Time: ${val} ${cpuUnit}${pctStr}${execStr}`;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
+            // 4. Top I/O-Consuming Tables / Objects (Compact Proportional Ranking Component)
+            const topIoRankingListElem = document.getElementById("topIoRankingList");
+            const ioEmptyElem = document.getElementById("topIoQueriesEmpty");
+            const ioWaits = charts.io_waits || [];
+            const ioAvailable = charts.io_metrics_available !== false;
+            const rawIoUnit = (ioWaits.length > 0 && ioWaits[0].io_unit) ? ioWaits[0].io_unit : "operations";
+            const formattedIoUnit = rawIoUnit.charAt(0).toUpperCase() + rawIoUnit.slice(1);
+
+            if (document.getElementById("topIoBadgeText")) {
+                document.getElementById("topIoBadgeText").innerText = `${formattedIoUnit} (${rangeText})`;
+            }
+
+            if (!ioAvailable || ioWaits.length === 0) {
+                if (ioEmptyElem) {
+                    ioEmptyElem.innerText = charts.io_metrics_reason || "Insufficient workload data for analysis.";
+                    ioEmptyElem.classList.remove("hidden");
+                }
+                if (topIoRankingListElem) topIoRankingListElem.innerHTML = "";
+            } else {
+                if (ioEmptyElem) ioEmptyElem.classList.add("hidden");
+                if (topIoRankingListElem) {
+                    const ioColors = ['#2563EB', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#06B6D4'];
+                    topIoRankingListElem.innerHTML = ioWaits.slice(0, 6).map((item, idx) => {
+                        const name = item.entity_name || item.name || "Unknown";
+                        const fullName = item.full_name || item.full_entity_name || item.entity_name || item.name || name;
+                        const ioOps = item.io_operations !== undefined ? item.io_operations : parseInt(String(item.metric).replace(/[^0-9]/g, '')) || 0;
+                        const pct = item.percentage_of_total !== undefined ? item.percentage_of_total : 0.0;
+                        const icon = item.entity_type === 'table' ? 'table' : 'file-code';
+                        const reads = item.read_operations;
+                        const writes = item.write_operations;
+                        const rwText = (reads !== undefined && writes !== undefined && (reads > 0 || writes > 0)) ? `Reads: ${reads.toLocaleString()} | Writes: ${writes.toLocaleString()}` : '';
+                        const color = ioColors[idx % ioColors.length];
+
+                        return `
+                            <div class="p-2.5 bg-slate-50 rounded-lg border border-slate-200/70 hover:border-blue-400 transition-all cursor-default group" title="${fullName}">
+                                <div class="flex items-center justify-between text-xs mb-1.5">
+                                    <div class="flex items-center gap-2 truncate max-w-[70%]">
+                                        <span class="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-extrabold shrink-0 text-white" style="background-color: ${color}">${idx + 1}</span>
+                                        <i data-lucide="${icon}" class="w-3.5 h-3.5 shrink-0" style="color: ${color}"></i>
+                                        <span class="font-bold text-slate-800 truncate transition-colors">${name}</span>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span class="font-extrabold text-slate-900 text-xs">${ioOps.toLocaleString()} ${rawIoUnit}</span>
+                                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style="background-color: ${color}">${pct}%</span>
+                                    </div>
+                                </div>
+                                <div class="w-full bg-slate-200/80 h-2 rounded-full overflow-hidden flex">
+                                    <div class="h-full rounded-full transition-all duration-500" style="width: ${Math.max(4, pct)}%; background-color: ${color}"></div>
+                                </div>
+                                ${rwText ? `<div class="mt-1 text-[10px] text-slate-500 font-medium flex justify-end gap-2">${rwText}</div>` : ''}
+                            </div>
+                        `;
+                    }).join("");
+                }
+            }
+
+            // 5. Wait Statistics (Doughnut Chart)
+            const waitCtx = document.getElementById("waitStatsChart");
+            const waitEmptyElem = document.getElementById("waitStatsEmpty");
+            if (waitCtx) {
+                if (waitStatsInstance) waitStatsInstance.destroy();
+                const waitStats = charts.wait_statistics || [];
+                const waitStatusCode = charts.wait_status_code || "no_waits";
+                const waitReason = charts.wait_reason || "No significant wait events detected during the selected period.";
+
+                if (document.getElementById("waitStatsBadgeText")) {
+                    document.getElementById("waitStatsBadgeText").innerText = `Wait Events (${rangeText})`;
+                }
+
+                if (!waitStats || waitStats.length === 0) {
+                    if (waitEmptyElem) {
+                        waitEmptyElem.innerText = waitReason;
+                        waitEmptyElem.classList.remove("hidden");
+                    }
+                    waitCtx.classList.add("hidden");
+                } else {
+                    if (waitEmptyElem) waitEmptyElem.classList.add("hidden");
+                    waitCtx.classList.remove("hidden");
+
+                    const waitLabels = waitStats.map(w => w.name || w.wait_event);
+                    const waitFullNames = waitStats.map(w => w.full_name || w.wait_event);
+                    const waitValues = waitStats.map(w => {
+                        const v = w.wait_time !== undefined ? w.wait_time : parseFloat(String(w.count).replace(/[^0-9.]/g, ''));
+                        return (!isNaN(v) && v > 0) ? v : 1;
+                    });
+
+                    waitStatsInstance = new Chart(waitCtx.getContext('2d'), {
+                        type: 'doughnut',
+                        data: {
+                            labels: waitLabels,
+                            datasets: [{
+                                data: waitValues,
+                                backgroundColor: ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#6366F1', '#84CC16', '#F43F5E'],
+                                borderWidth: 2,
+                                borderColor: '#FFFFFF'
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { position: 'right', labels: { color: '#4B5563', font: { size: 11 }, boxWidth: 12 } },
+                                tooltip: {
+                                    padding: 10,
+                                    callbacks: {
+                                        title: function(context) {
+                                            const idx = context[0].dataIndex;
+                                            const fullN = waitFullNames[idx] || context[0].label;
+                                            return formatFullQueryForTooltip(fullN, 55);
+                                        },
+                                        label: function(context) {
+                                            const idx = context.dataIndex;
+                                            const item = waitStats[idx] || {};
+                                            const val = context.parsed;
+                                            const catStr = item.wait_category ? ` | Category: ${item.wait_category}` : '';
+                                            const pctStr = item.percentage_of_total !== undefined ? ` (${item.percentage_of_total}%)` : '';
+                                            const cntStr = item.wait_count ? ` | Waits: ${item.wait_count}` : '';
+                                            const unitStr = item.wait_time_unit ? ` ${item.wait_time_unit}` : '';
+                                            return ` Wait Time: ${val}${unitStr}${pctStr}${cntStr}${catStr}`;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
+            // 6. Buffer Pool / Cache Efficiency (Part-to-Whole Donut Chart: Hits + Misses = 100%)
+            const cacheCtx = document.getElementById("cacheGaugeChart");
+            if (cacheCtx) {
+                if (cacheGaugeInstance) cacheGaugeInstance.destroy();
+                const cacheKpi = charts.cache_kpi || kpis.cache || {};
+                const hitRatio = parseFloat(cacheKpi.hit_ratio !== undefined ? cacheKpi.hit_ratio : kpis.cache_hit_ratio) || 99.4;
+                const missRatio = parseFloat((100.0 - hitRatio).toFixed(1));
+                const cacheStatus = cacheKpi.status || "Healthy";
+
+                const cacheRatioElem = document.getElementById("cacheRatioText");
+                if (cacheRatioElem) {
+                    cacheRatioElem.innerHTML = `<span class="text-emerald-600 font-extrabold">${hitRatio}% Hits</span> <span class="text-slate-400 font-normal">/</span> <span class="text-red-500 font-extrabold">${missRatio}% Misses</span>`;
+                }
+
+                const cacheBadgeElem = document.getElementById("cacheBadgeText");
+                if (cacheBadgeElem) {
+                    cacheBadgeElem.innerText = cacheStatus;
+                    if (cacheStatus === "Healthy" || cacheStatus === "Normal") {
+                        cacheBadgeElem.className = "text-[11px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200";
+                    } else if (cacheStatus === "Elevated") {
+                        cacheBadgeElem.className = "text-[11px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200";
+                    } else {
+                        cacheBadgeElem.className = "text-[11px] font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-200";
+                    }
+                }
+
+                cacheGaugeInstance = new Chart(cacheCtx.getContext('2d'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Cache Hits', 'Cache Misses'],
+                        datasets: [{
+                            data: [hitRatio, missRatio],
+                            backgroundColor: ['#10B981', '#EF4444'],
+                            hoverBackgroundColor: ['#059669', '#DC2626'],
+                            borderWidth: 2,
+                            borderColor: '#FFFFFF'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '72%',
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                padding: 10,
+                                callbacks: {
+                                    title: function(context) {
+                                        return context[0].label;
+                                    },
+                                    label: function(context) {
+                                        const idx = context.dataIndex;
+                                        const val = context.parsed;
+                                        let countInfo = '';
+                                        if (idx === 0 && cacheKpi.hit_count !== null && cacheKpi.hit_count !== undefined) {
+                                            countInfo = ` (${cacheKpi.hit_count.toLocaleString()} blocks/reads)`;
+                                        } else if (idx === 1 && cacheKpi.miss_count !== null && cacheKpi.miss_count !== undefined) {
+                                            countInfo = ` (${cacheKpi.miss_count.toLocaleString()} blocks/reads)`;
+                                        }
+                                        return ` ${context.label}: ${val}%${countInfo}`;
+                                    },
+                                    afterLabel: function() {
+                                        return ` Total: 100% (${rangeText})`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 7. Data vs Index Storage (Doughnut Chart)
+            const storageCtx = document.getElementById("storagePieChart");
+            const storageEmptyElem = document.getElementById("storagePieEmpty");
+            if (storageCtx) {
+                if (storagePieInstance) storagePieInstance.destroy();
+                let rawStorageData = charts.storage_breakdown || [];
+
+                let storageData = [];
+                if (Array.isArray(rawStorageData)) {
+                    rawStorageData.forEach(item => {
+                        if (item && typeof item === 'object') {
+                            if (item.label !== undefined && item.value !== undefined) {
+                                storageData.push(item);
+                            } else if (item.data_mb !== undefined || item.index_mb !== undefined) {
+                                storageData.push({ label: 'Data Size', value: (item.data_mb || 0) + ' MB' });
+                                storageData.push({ label: 'Index Size', value: (item.index_mb || 0) + ' MB' });
+                            }
+                        }
+                    });
+                } else if (rawStorageData && typeof rawStorageData === 'object') {
+                    if (rawStorageData.data_mb !== undefined || rawStorageData.index_mb !== undefined) {
+                        storageData.push({ label: 'Data Size', value: (rawStorageData.data_mb || 0) + ' MB' });
+                        storageData.push({ label: 'Index Size', value: (rawStorageData.index_mb || 0) + ' MB' });
+                    }
+                }
+
+                const validStorageItems = storageData.filter(d => d && d.label && d.label !== 'undefined' && d.value !== undefined);
+                const pieValues = validStorageItems.map(d => parseFloat(String(d.value).replace(/[^0-9.]/g, '')) || 0);
+                const hasNonZero = pieValues.some(v => v > 0);
+
+                if (!hasNonZero || validStorageItems.length === 0) {
+                    if (storageEmptyElem) storageEmptyElem.classList.remove("hidden");
+                    storageCtx.classList.add("hidden");
+                } else {
+                    if (storageEmptyElem) storageEmptyElem.classList.add("hidden");
+                    storageCtx.classList.remove("hidden");
+
+                    const pieLabels = validStorageItems.map(d => d.label);
+
+                    storagePieInstance = new Chart(storageCtx.getContext('2d'), {
+                        type: 'doughnut',
+                        data: {
+                            labels: pieLabels,
+                            datasets: [{
+                                data: pieValues,
+                                backgroundColor: ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899'],
+                                borderWidth: 2,
+                                borderColor: '#FFFFFF'
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { position: 'bottom', labels: { color: '#4B5563', font: { size: 11 } } }
+                            }
+                        }
+                    });
+                }
+            }
+
+            // 8. Top 10 Largest Tables (Bar Chart)
+            const topTablesCtx = document.getElementById("topTablesBarChart");
+            const topTablesEmptyElem = document.getElementById("topTablesEmpty");
+            if (topTablesCtx) {
+                if (topTablesBarInstance) topTablesBarInstance.destroy();
+                const topTables = charts.top_tables || [];
+
+                if (topTables.length === 0) {
+                    if (topTablesEmptyElem) topTablesEmptyElem.classList.remove("hidden");
+                    topTablesCtx.classList.add("hidden");
+                } else {
+                    if (topTablesEmptyElem) topTablesEmptyElem.classList.add("hidden");
+                    topTablesCtx.classList.remove("hidden");
+
+                    const topLabels = topTables.map(t => t.name);
+                    const topValues = topTables.map(t => parseFloat(String(t.size).replace(/[^0-9.]/g, '')) || 0);
+
+                    topTablesBarInstance = new Chart(topTablesCtx.getContext('2d'), {
+                        type: 'bar',
+                        data: {
+                            labels: topLabels,
+                            datasets: [{
+                                label: 'Size',
+                                data: topValues,
+                                backgroundColor: ['#3B82F6', '#10B981', '#6366F1', '#F59E0B', '#EC4899', '#8B5CF6', '#14B8A6', '#F43F5E', '#06B6D4', '#84CC16'],
+                                borderRadius: 6
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                x: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { display: false } },
+                                y: { ticks: { color: '#6B7280', font: { size: 10 } }, grid: { color: '#E5E7EB' } }
+                            },
+                            plugins: { legend: { display: false } }
+                        }
+                    });
+                }
+            }
+        }
+
+        function renderInsightsList(reports) {
+            const container = document.getElementById("insightsContainer");
+            container.innerHTML = "";
+
+            reports.forEach((report, idx) => {
+                const rawTitle = report.title || "";
+                const cleanTitle = rawTitle.replace(/^\d+\.\s*/, "").trim();
+                const card = document.createElement("div");
+                card.className = "insight-card border border-slate-200 rounded-xl bg-white overflow-hidden shadow-xs hover:border-slate-300 transition-colors";
+                card.dataset.title = `${idx + 1}. ${cleanTitle} ${rawTitle}`.toLowerCase();
+
+                const headers = report.headers || [];
+                const rows = report.rows || [];
+
+                let tableHtml = "";
+                if (report.error) {
+                    const errText = String(report.error).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                    const noteText = report.note ? String(report.note).replace(/</g, "&lt;").replace(/>/g, "&gt;") : "";
+                    tableHtml = `
+                        <div class="p-4 bg-red-50 border-t border-red-200 text-red-700 text-xs flex items-start gap-2.5">
+                            <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600 shrink-0 mt-0.5"></i>
+                            <div>
+                                <p class="font-bold text-red-800">Query Execution Error</p>
+                                <p class="mt-1 text-red-700 font-mono text-[11px] whitespace-pre-wrap">${errText}</p>
+                                ${noteText ? `<p class="mt-2 text-slate-600 text-[11px]">${noteText}</p>` : ''}
+                            </div>
+                        </div>
+                    `;
+                } else if (rows.length === 0) {
+                    tableHtml = `<p class="text-xs text-slate-400 italic p-4 text-center">No records found (Query executed successfully but returned 0 rows).</p>`;
+                } else {
+                    const headerCols = headers.map(h => `<th class="px-4 py-2 text-left text-xs font-bold text-[#1F2937] uppercase tracking-wider bg-slate-50 border-b border-slate-200">${h}</th>`).join("");
+                    const bodyRows = rows.slice(0, 20).map(row => {
+                        const cols = row.map(val => `<td class="px-4 py-2 text-xs text-slate-700 whitespace-nowrap">${val !== null ? val : '-'}</td>`).join("");
+                        return `<tr class="border-b border-slate-100 hover:bg-slate-50/70 transition-colors">${cols}</tr>`;
+                    }).join("");
+
+                    tableHtml = `
+                        <div class="overflow-x-auto max-h-80">
+                            <table class="w-full">
+                                <thead><tr>${headerCols}</tr></thead>
+                                <tbody>${bodyRows}</tbody>
+                            </table>
+                        </div>
+                        ${rows.length > 20 ? `<div class="p-2 text-center text-xs font-medium text-slate-500 bg-slate-50 border-t border-slate-200">Showing top 20 of ${rows.length} rows</div>` : ''}
+                    `;
+                }
+
+                card.innerHTML = `
+                    <div class="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors" onclick="toggleAccordion(${idx})">
+                        <div class="flex items-center gap-3">
+                            <span class="w-6 h-6 rounded bg-blue-50 text-blue-600 border border-blue-100 flex items-center justify-center text-xs font-bold shrink-0">
+                                ${idx + 1}
+                            </span>
+                            <div>
+                                <h4 class="text-xs font-bold text-[#1F2937]">${cleanTitle}</h4>
+                                ${report.note ? `<p class="text-[11px] text-slate-500 mt-0.5">${report.note}</p>` : ''}
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            ${report.error
+                                ? `<span class="text-xs font-semibold px-2 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 flex items-center gap-1"><i data-lucide="alert-circle" class="w-3.5 h-3.5 text-red-600"></i> Error</span>`
+                                : `<span class="text-xs font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">${rows.length} Rows</span>`
+                            }
+                            <i id="accordionIcon_${idx}" data-lucide="chevron-down" class="w-4 h-4 text-slate-400 transition-transform"></i>
+                        </div>
+                    </div>
+                    <div id="accordionContent_${idx}" class="hidden border-t border-slate-200 bg-white">
+                        ${tableHtml}
+                    </div>
+                `;
+
+                container.appendChild(card);
+            });
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function toggleAccordion(idx) {
+            const content = document.getElementById(`accordionContent_${idx}`);
+            const icon = document.getElementById(`accordionIcon_${idx}`);
+            content.classList.toggle("hidden");
+            icon.classList.toggle("rotate-180");
+        }
+
+        function filterInsights() {
+            const query = document.getElementById("insightSearch").value.toLowerCase();
+            const cards = document.querySelectorAll(".insight-card");
+
+            cards.forEach(card => {
+                const title = card.dataset.title || "";
+                if (title.includes(query)) {
+                    card.classList.remove("hidden");
+                } else {
+                    card.classList.add("hidden");
+                }
+            });
+        }
+
+        function disconnectDatabase() {
+            document.getElementById("statusBadge").classList.add("hidden");
+            if (document.getElementById("timeRangeBadge")) document.getElementById("timeRangeBadge").classList.add("hidden");
+            if (document.getElementById("tabsContainer")) document.getElementById("tabsContainer").classList.add("hidden");
+            document.getElementById("pdfExportBtn").classList.add("hidden");
+            document.getElementById("disconnectBtn").classList.add("hidden");
+            document.getElementById("dashboardScreen").classList.add("hidden");
+            document.getElementById("selectionScreen").classList.remove("hidden");
+            reportsData = [];
+            currentChartsData = null;
+        }
+
+        async function exportPdfReport() {
+            if (!selectedDb || !currentCredentials) return;
+            const pdfBtn = document.getElementById("pdfExportBtn");
+
+            pdfBtn.disabled = true;
+            pdfBtn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Exporting PDF...`;
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const res = await fetch("/api/export-pdf", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        database_type: selectedDb.id,
+                        credentials: currentCredentials
+                    })
+                });
+
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.detail || "PDF export error");
+                }
+
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `${selectedDb.id.replace(' ', '_')}_Metadata_Report.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+
+            } catch (err) {
+                alert("PDF Export Error: " + err.message);
+            } finally {
+                pdfBtn.disabled = false;
+                pdfBtn.innerHTML = `<i data-lucide="file-text" class="w-4 h-4"></i><span>Export Database Metadata PDF</span>`;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        // ---------------------------------------------------------------------------
+        // DATA INSIGHTS TAB CONTROLLER & CHARTS
+        // ---------------------------------------------------------------------------
+        let activeDashboardTab = "database";
+        let diProfileData = null;
+        let diChartInstances = {};
+
+        function switchDashboardTab(tabName) {
+            activeDashboardTab = tabName;
+            const tabDb = document.getElementById("tabBtnDatabase");
+            const tabData = document.getElementById("tabBtnData");
+
+            const dbDashboard = document.getElementById("databaseInsightsDashboard");
+            const dataDashboard = document.getElementById("dataInsightsDashboard");
+
+            const pdfBtn = document.getElementById("pdfExportBtn");
+
+            if (tabName === "database") {
+                if (tabDb) tabDb.className = "py-4 px-1 inline-flex items-center gap-2 border-b-2 font-bold text-sm text-blue-600 border-blue-600 focus:outline-none cursor-pointer";
+                if (tabData) tabData.className = "py-4 px-1 inline-flex items-center gap-2 border-b-2 font-semibold text-sm text-slate-500 border-transparent hover:text-slate-700 hover:border-slate-300 focus:outline-none cursor-pointer";
+
+                if (dbDashboard) dbDashboard.classList.remove("hidden");
+                if (dataDashboard) dataDashboard.classList.add("hidden");
+                if (document.getElementById("timeRangeBadge")) document.getElementById("timeRangeBadge").classList.remove("hidden");
+
+                if (pdfBtn) {
+                    pdfBtn.innerHTML = `<i data-lucide="file-text" class="w-4 h-4"></i><span>Export Database Metadata PDF</span>`;
+                    pdfBtn.onclick = exportPdfReport;
+                    pdfBtn.disabled = false;
+                    pdfBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                    pdfBtn.title = "Export Database Metadata PDF Report";
+                }
+            } else {
+                if (tabData) tabData.className = "py-4 px-1 inline-flex items-center gap-2 border-b-2 font-bold text-sm text-blue-600 border-blue-600 focus:outline-none cursor-pointer";
+                if (tabDb) tabDb.className = "py-4 px-1 inline-flex items-center gap-2 border-b-2 font-semibold text-sm text-slate-500 border-transparent hover:text-slate-700 hover:border-slate-300 focus:outline-none cursor-pointer";
+
+                if (dbDashboard) dbDashboard.classList.add("hidden");
+                if (dataDashboard) dataDashboard.classList.remove("hidden");
+                if (document.getElementById("timeRangeBadge")) document.getElementById("timeRangeBadge").classList.add("hidden");
+
+                const resContainer = document.getElementById("diResultsContainer");
+                const hasResults = diProfileData && resContainer && !resContainer.classList.contains("hidden");
+
+                if (pdfBtn) {
+                    pdfBtn.innerHTML = `<i data-lucide="file-text" class="w-4 h-4"></i><span>Export Data Insights PDF</span>`;
+                    pdfBtn.onclick = exportDataInsightsPdf;
+                    if (hasResults) {
+                        pdfBtn.disabled = false;
+                        pdfBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                        pdfBtn.title = "Export Data Insights PDF Report";
+                    } else {
+                        pdfBtn.disabled = true;
+                        pdfBtn.classList.add("opacity-50", "cursor-not-allowed");
+                        pdfBtn.title = "Click 'Analyze Data' first to enable PDF export";
+                    }
+                }
+
+                const schemaSelect = document.getElementById("diSchemaSelect");
+                if (schemaSelect && schemaSelect.options.length <= 1) {
+                    initDataInsightsSelectors();
+                } else if (diProfileData) {
+                    renderDataInsightsResults(diProfileData);
+                }
+            }
+            if (window.lucide) lucide.createIcons();
+        }
+
+        let isDiInitRunning = false;
+
+        async function initDataInsightsSelectors() {
+            if (isDiInitRunning) return;
+            isDiInitRunning = true;
+
+            try {
+                // 1. Fetch Databases
+                const dbRes = await fetch("/api/data-insights/databases");
+                const dbData = await dbRes.json();
+                let selectedDb = "";
+                if (dbData.success && dbData.databases && dbData.databases.length > 0) {
+                    const dbSelect = document.getElementById("diDatabaseSelect");
+                    if (dbSelect) {
+                        dbSelect.innerHTML = `<option value="">Select Database</option>` + 
+                            dbData.databases.map(d => `<option value="${d}">${d}</option>`).join("");
+                        dbSelect.value = dbData.databases[0];
+                        selectedDb = dbData.databases[0];
+                    }
+                }
+
+                // 2. Fetch Schemas for selected database
+                const res = await fetch(`/api/data-insights/schemas?database=${encodeURIComponent(selectedDb)}`);
+                const data = await res.json();
+                let selectedSchema = "";
+                if (data.success && data.schemas && data.schemas.length > 0) {
+                    const schemaSelect = document.getElementById("diSchemaSelect");
+                    if (schemaSelect) {
+                        schemaSelect.innerHTML = `<option value="">Select Schema</option>` + 
+                            data.schemas.map(s => `<option value="${s}">${s}</option>`).join("");
+                        schemaSelect.value = data.schemas[0];
+                        selectedSchema = data.schemas[0];
+                    }
+                }
+
+                // 3. Fetch Tables for selected schema
+                if (selectedSchema || selectedDb) {
+                    const tableSelect = document.getElementById("diTableSelect");
+                    const tRes = await fetch(`/api/data-insights/tables?database=${encodeURIComponent(selectedDb)}&schema=${encodeURIComponent(selectedSchema || "")}`);
+                    const tData = await tRes.json();
+                    if (tData.success && tData.tables && tableSelect) {
+                        tableSelect.innerHTML = `<option value="">Select Table</option>` +
+                            tData.tables.map(t => `<option value="${t}">${t}</option>`).join("");
+                        if (tData.tables.length > 0) {
+                            tableSelect.value = tData.tables[0];
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn("Could not load Data Insights selectors:", e);
+            } finally {
+                isDiInitRunning = false;
+            }
+        }
+
+        async function onDiSchemaChange(schema) {
+            const tableSelect = document.getElementById("diTableSelect");
+            if (!tableSelect) return;
+
+            const dbSelect = document.getElementById("diDatabaseSelect");
+            const db = dbSelect ? dbSelect.value : "";
+
+            try {
+                const res = await fetch(`/api/data-insights/tables?database=${encodeURIComponent(db)}&schema=${encodeURIComponent(schema || "")}`);
+                const data = await res.json();
+                if (data.success && data.tables) {
+                    tableSelect.innerHTML = `<option value="">Select Table</option>` +
+                        data.tables.map(t => `<option value="${t}">${t}</option>`).join("");
+                    if (data.tables.length > 0) {
+                        tableSelect.value = data.tables[0];
+                    }
+                }
+            } catch (e) {
+                console.warn("Could not load Data Insights tables:", e);
+            }
+        }
+
+        function onDiTableSelectChange() {
+            diProfileData = null;
+            const emptyState = document.getElementById("diEmptyState");
+            const loadingState = document.getElementById("diLoadingState");
+            const resultsContainer = document.getElementById("diResultsContainer");
+            if (resultsContainer) resultsContainer.classList.add("hidden");
+            if (loadingState) loadingState.classList.add("hidden");
+            if (emptyState) emptyState.classList.remove("hidden");
+
+            if (activeDashboardTab === "data") {
+                const pdfBtn = document.getElementById("pdfExportBtn");
+                if (pdfBtn) {
+                    pdfBtn.disabled = true;
+                    pdfBtn.classList.add("opacity-50", "cursor-not-allowed");
+                    pdfBtn.title = "Click 'Analyze Data' first to enable PDF export";
+                }
+            }
+        }
+
+        async function onDiDatabaseChange(db) {
+            const schemaSelect = document.getElementById("diSchemaSelect");
+            try {
+                const res = await fetch(`/api/data-insights/schemas?database=${encodeURIComponent(db)}`);
+                const data = await res.json();
+                if (data.success && data.schemas && schemaSelect) {
+                    schemaSelect.innerHTML = `<option value="">Select Schema</option>` + 
+                        data.schemas.map(s => `<option value="${s}">${s}</option>`).join("");
+                    if (data.schemas.length > 0) {
+                        schemaSelect.value = data.schemas[0];
+                        await onDiSchemaChange(data.schemas[0]);
+                    }
+                }
+            } catch (e) {
+                console.warn("Error updating database selection:", e);
+            }
+        }
+
+        async function runDataProfiling() {
+            const dbSelect = document.getElementById("diDatabaseSelect");
+            const schemaSelect = document.getElementById("diSchemaSelect");
+            const tableSelect = document.getElementById("diTableSelect");
+
+            const table = tableSelect ? tableSelect.value : "";
+            if (!table) {
+                alert("Please select a table to analyze.");
+                return;
+            }
+
+            const database = dbSelect ? dbSelect.value : "";
+            const schema = schemaSelect ? schemaSelect.value : "";
+            const limitSelect = document.getElementById("diLimitSelect");
+            const limit = limitSelect ? parseInt(limitSelect.value, 10) : 1000;
+
+            const emptyState = document.getElementById("diEmptyState");
+            const loadingState = document.getElementById("diLoadingState");
+            const resultsContainer = document.getElementById("diResultsContainer");
+
+            if (emptyState) emptyState.classList.add("hidden");
+            if (resultsContainer) resultsContainer.classList.add("hidden");
+            if (loadingState) loadingState.classList.remove("hidden");
+
+            try {
+                const res = await fetch("/api/data-insights/profile", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ database, schema, table, limit })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.detail || "Data profiling failed.");
+                }
+
+                diProfileData = data;
+                renderDataInsightsResults(data);
+
+            } catch (err) {
+                alert(`Data Insights Error: ${err.message}`);
+                if (emptyState) emptyState.classList.remove("hidden");
+            } finally {
+                if (loadingState) loadingState.classList.add("hidden");
+            }
+        }
+
+        function renderDataInsightsResults(data) {
+            const emptyState = document.getElementById("diEmptyState");
+            const loadingState = document.getElementById("diLoadingState");
+            const resultsContainer = document.getElementById("diResultsContainer");
+            
+            if (loadingState) loadingState.classList.add("hidden");
+            if (emptyState) emptyState.classList.add("hidden");
+            if (resultsContainer) resultsContainer.classList.remove("hidden");
+
+            const pdfBtn = document.getElementById("pdfExportBtn");
+            if (pdfBtn && activeDashboardTab === "data") {
+                pdfBtn.disabled = false;
+                pdfBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                pdfBtn.title = "Export Data Insights PDF Report";
+            }
+
+            const s = data.summary || {};
+            if (document.getElementById("diKpiRows")) document.getElementById("diKpiRows").innerText = Number(s.total_rows || 0).toLocaleString();
+            if (document.getElementById("diKpiCols")) document.getElementById("diKpiCols").innerText = s.total_columns || 0;
+            if (document.getElementById("diKpiMissing")) document.getElementById("diKpiMissing").innerText = Number(s.missing_cells || 0).toLocaleString();
+            if (document.getElementById("diKpiMissingSub")) document.getElementById("diKpiMissingSub").innerText = `${s.missing_percentage || 0}% missing`;
+            if (document.getElementById("diKpiDuplicates")) document.getElementById("diKpiDuplicates").innerText = Number(s.duplicate_extra_records || 0).toLocaleString();
+            if (document.getElementById("diKpiDuplicatesSub")) document.getElementById("diKpiDuplicatesSub").innerText = `${s.duplicate_percentage || 0}% extra duplicates`;
+
+            const profBody = document.getElementById("diColumnProfilingTableBody");
+            const profilesList = data.column_profiles || data.profiles || [];
+            if (profBody && profilesList.length > 0) {
+                profBody.innerHTML = profilesList.map(p => {
+                    const stats = p.statistics || {};
+                    let statSummary = "-";
+                    if (p.category && p.category.includes("NUMERICAL")) {
+                        statSummary = `Mean: ${stats.mean !== undefined ? Number(stats.mean).toFixed(2) : '-'}, Med: ${stats.median !== undefined ? Number(stats.median).toFixed(2) : '-'}`;
+                    } else if (stats.mode !== undefined) {
+                        statSummary = `Mode: ${stats.mode}`;
+                    }
+                    return `
+                        <tr class="hover:bg-slate-50 transition-colors">
+                            <td class="py-2.5 px-3 font-bold text-blue-600">${p.column}</td>
+                            <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded bg-slate-100 font-mono text-[11px]">${p.physical_datatype || p.spark_type}</span></td>
+                            <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-semibold text-[11px]">${p.category}</span></td>
+                            <td class="py-2.5 px-3">${Number(p.missing_count || 0).toLocaleString()}</td>
+                            <td class="py-2.5 px-3">${Number(p.missing_percentage || 0).toFixed(2)}%</td>
+                            <td class="py-2.5 px-3">${Number(p.unique_count || 0).toLocaleString()}</td>
+                            <td class="py-2.5 px-3 text-slate-600">${statSummary}</td>
+                        </tr>
+                    `;
+                }).join("");
+            }
+
+            const impBody = document.getElementById("diImputationTableBody");
+            if (impBody && data.imputation_recommendations) {
+                impBody.innerHTML = data.imputation_recommendations.map(imp => {
+                    return `
+                        <tr class="hover:bg-amber-50/50 transition-colors">
+                            <td class="py-2.5 px-3 font-bold text-slate-900">${imp.column}</td>
+                            <td class="py-2.5 px-3">${Number(imp.missing_count || 0).toLocaleString()} (${imp.missing_pct}%)</td>
+                            <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-bold text-[11px]">${imp.recommended_method}</span></td>
+                            <td class="py-2.5 px-3 text-slate-600">${imp.reason}</td>
+                        </tr>
+                    `;
+                }).join("");
+            }
+
+            const incList = document.getElementById("diInconsistenciesList");
+            if (incList) {
+                const incs = data.inconsistencies || [];
+                if (incs.length === 0) {
+                    incList.innerHTML = `<div class="p-3 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-semibold flex items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 flex-shrink-0"></i> No confirmed data inconsistencies detected.</div>`;
+                } else {
+                    incList.innerHTML = incs.map(i => {
+                        const title = `${i.issue_type || i.type || 'Inconsistency'} - Col: ${i.column || 'All'}`;
+                        const msg = i.message || i.description || '';
+                        const rec = i.recommendation ? `<div class="mt-1.5 text-[11px] text-amber-900 font-semibold bg-amber-100/70 p-1.5 rounded">💡 ${i.recommendation}</div>` : '';
+                        const ex = (i.examples && i.examples.length) ? `<div class="mt-1 text-[10px] text-slate-600 font-mono truncate">Ex: [${i.examples.join(', ')}]</div>` : '';
+                        const affected = i.affected_count ? `<span class="text-[10px] px-1.5 py-0.5 bg-amber-200/80 rounded font-bold text-amber-900 flex-shrink-0">${i.affected_count} rows (${i.affected_percentage || 0}%)</span>` : '';
+                        
+                        return `
+                        <div class="p-3 bg-amber-50/90 border border-amber-200 rounded-lg text-amber-900 break-words overflow-hidden space-y-1">
+                            <div class="font-bold flex items-center justify-between gap-1.5 flex-wrap">
+                                <span class="flex items-center gap-1.5 text-xs font-bold text-amber-950"><i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-600 flex-shrink-0"></i> ${title}</span>
+                                ${affected}
+                            </div>
+                            ${msg ? `<div class="text-[11px] text-slate-700 leading-relaxed font-medium">${msg}</div>` : ''}
+                            ${ex}
+                            ${rec}
+                        </div>`;
+                    }).join("");
+                }
+            }
+
+            const anomList = document.getElementById("diAnomaliesList");
+            if (anomList) {
+                const anoms = data.potential_anomalies || [];
+                if (anoms.length === 0) {
+                    anomList.innerHTML = `<div class="p-3 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-semibold flex items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 flex-shrink-0"></i> No potential data anomalies detected.</div>`;
+                } else {
+                    anomList.innerHTML = anoms.map(a => {
+                        const title = `${a.issue_type || a.type || 'Potential Anomaly'} - Col: ${a.column || 'All'}`;
+                        const msg = a.message || a.description || '';
+                        const rec = a.recommendation ? `<div class="mt-1.5 text-[11px] text-red-900 font-semibold bg-red-100/70 p-1.5 rounded">💡 ${a.recommendation}</div>` : '';
+                        const ex = (a.examples && a.examples.length) ? `<div class="mt-1 text-[10px] text-slate-600 font-mono truncate">Ex: [${a.examples.join(', ')}]</div>` : '';
+                        const affected = a.affected_count ? `<span class="text-[10px] px-1.5 py-0.5 bg-red-200/80 rounded font-bold text-red-900 flex-shrink-0">${a.affected_count} rows (${a.affected_percentage || 0}%)</span>` : '';
+
+                        return `
+                        <div class="p-3 bg-red-50/90 border border-red-200 rounded-lg text-red-900 break-words overflow-hidden space-y-1">
+                            <div class="font-bold flex items-center justify-between gap-1.5 flex-wrap">
+                                <span class="flex items-center gap-1.5 text-xs font-bold text-red-950"><i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-red-600 flex-shrink-0"></i> ${title}</span>
+                                ${affected}
+                            </div>
+                            ${msg ? `<div class="text-[11px] text-slate-700 leading-relaxed font-medium">${msg}</div>` : ''}
+                            ${ex}
+                            ${rec}
+                        </div>`;
+                    }).join("");
+                }
+            }
+
+            renderDiCharts(data.charts);
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function renderDiCharts(charts) {
+            charts = charts || {};
+
+            function getCtx(id) {
+                if (diChartInstances[id]) {
+                    diChartInstances[id].destroy();
+                }
+                const canvas = document.getElementById(id);
+                return canvas ? canvas.getContext("2d") : null;
+            }
+
+            const ctx1 = getCtx("diMissingChart");
+            if (ctx1 && charts.missing_by_col) {
+                diChartInstances["diMissingChart"] = new Chart(ctx1, {
+                    type: "bar",
+                    data: {
+                        labels: charts.missing_by_col.labels,
+                        datasets: [{
+                            label: "Missing %",
+                            data: charts.missing_by_col.values,
+                            backgroundColor: "#3B82F6",
+                            borderRadius: 4
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } } }
+                });
+            }
+
+            const ctx2 = getCtx("diQualityOverviewChart");
+            if (ctx2 && charts.quality_overview) {
+                diChartInstances["diQualityOverviewChart"] = new Chart(ctx2, {
+                    type: "doughnut",
+                    data: {
+                        labels: charts.quality_overview.labels,
+                        datasets: [{
+                            data: charts.quality_overview.values,
+                            backgroundColor: ["#10B981", "#F59E0B", "#EF4444", "#8B5CF6"]
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+
+            const ctx3 = getCtx("diRecordDuplicatesChart");
+            if (ctx3 && charts.record_duplicates) {
+                diChartInstances["diRecordDuplicatesChart"] = new Chart(ctx3, {
+                    type: "pie",
+                    data: {
+                        labels: charts.record_duplicates.labels,
+                        datasets: [{
+                            data: charts.record_duplicates.values,
+                            backgroundColor: ["#2563EB", "#DC2626"]
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+
+            const ctx4 = getCtx("diSemanticDistributionChart");
+            if (ctx4 && charts.semantic_distribution) {
+                diChartInstances["diSemanticDistributionChart"] = new Chart(ctx4, {
+                    type: "doughnut",
+                    data: {
+                        labels: charts.semantic_distribution.labels,
+                        datasets: [{
+                            data: charts.semantic_distribution.values,
+                            backgroundColor: ["#3B82F6", "#6366F1", "#EC4899", "#F59E0B", "#10B981", "#64748B"]
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+
+            const ctx5 = getCtx("diNumericDistributionChart");
+            const empty5 = document.getElementById("diNumericDistributionEmpty");
+            if (charts.numeric_summary && charts.numeric_summary.labels && charts.numeric_summary.labels.length > 0) {
+                if (empty5) empty5.classList.add("hidden");
+                if (document.getElementById("diNumericDistributionChart")) document.getElementById("diNumericDistributionChart").classList.remove("hidden");
+                if (ctx5) {
+                    diChartInstances["diNumericDistributionChart"] = new Chart(ctx5, {
+                        type: "bar",
+                        data: {
+                            labels: charts.numeric_summary.labels,
+                            datasets: [
+                                { label: "Mean", data: charts.numeric_summary.means, backgroundColor: "#2563EB" },
+                                { label: "Median", data: charts.numeric_summary.medians, backgroundColor: "#10B981" }
+                            ]
+                        },
+                        options: { responsive: true, maintainAspectRatio: false }
+                    });
+                }
+            } else {
+                if (document.getElementById("diNumericDistributionChart")) document.getElementById("diNumericDistributionChart").classList.add("hidden");
+                if (empty5) empty5.classList.remove("hidden");
+            }
+
+            const ctx6 = getCtx("diCategoricalDistributionChart");
+            if (ctx6 && charts.categorical_summary && charts.categorical_summary.length > 0) {
+                const topCat = charts.categorical_summary[0];
+                diChartInstances["diCategoricalDistributionChart"] = new Chart(ctx6, {
+                    type: "bar",
+                    data: {
+                        labels: topCat.labels,
+                        datasets: [{ label: `Top Values (${topCat.column})`, data: topCat.counts, backgroundColor: "#8B5CF6" }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            }
+        }
+
+        async function exportDataInsightsPdf() {
+            const tableSelect = document.getElementById("diTableSelect");
+            const table = tableSelect ? tableSelect.value : "";
+            if (!table) {
+                alert("Please select and profile a table before exporting PDF.");
+                return;
+            }
+
+            const pdfBtn = document.getElementById("pdfExportBtn");
+            if (pdfBtn) {
+                pdfBtn.disabled = true;
+                pdfBtn.innerHTML = `<div class="inline-block animate-spin rounded-full h-3.5 w-3.5 border-2 border-white border-t-transparent"></div><span>Generating PDF...</span>`;
+            }
+
+            const dbSelect = document.getElementById("diDatabaseSelect");
+            const schemaSelect = document.getElementById("diSchemaSelect");
+            const limitSelect = document.getElementById("diLimitSelect");
+            const database = dbSelect ? dbSelect.value : "";
+            const schema = schemaSelect ? schemaSelect.value : "";
+            const limit = limitSelect ? parseInt(limitSelect.value, 10) : 1000;
+
+            try {
+                const res = await fetch("/api/data-insights/export-pdf", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ database, schema, table, limit })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || "PDF export failed.");
+                }
+
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `Data_Insights_${table}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+            } catch (err) {
+                alert(`Data Insights PDF Export Error: ${err.message}`);
+            } finally {
+                if (pdfBtn) {
+                    pdfBtn.disabled = false;
+                    pdfBtn.innerHTML = `<i data-lucide="file-text" class="w-4 h-4"></i><span>Export Data Insights PDF</span>`;
+                    if (window.lucide) lucide.createIcons();
+                }
+            }
+        }
+
+    </script>
+</body>
+</html>

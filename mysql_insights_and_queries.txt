@@ -1,0 +1,2651 @@
+================================================================================
+               MYSQL METADATA INSIGHTS & SQL QUERIES REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+INSIGHT #01: MySQL Environment and Server Information
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_environment_info()
+Headers     : Version, Comment, Hostname, Port, Data Directory, InnoDB Home
+Description : Environment and server configuration settings.
+
+SQL Query / Implementation:
+```python
+def get_environment_info(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                @@version AS mysql_version,
+                @@version_comment AS version_comment,
+                @@hostname AS hostname,
+                @@port AS port,
+                @@datadir AS data_directory,
+                @@innodb_data_home_dir AS innodb_data_home_dir
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "mysql_version": row.get("mysql_version", "-"),
+                    "version_comment": row.get("version_comment", "-"),
+                    "hostname": row.get("hostname", "-"),
+                    "port": row.get("port", "-"),
+                    "data_directory": row.get("data_directory", "-"),
+                    "innodb_data_home_dir": row.get("innodb_data_home_dir", "-"),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #02: 2. Database/schema inventory (0 Databases)
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_database_inventory_sizes()
+Headers     : Database Schema, DB Size
+Description : System schemas are excluded. Total DB size is aggregated at the bottom row.
+
+SQL Query / Implementation:
+```python
+def get_database_inventory_sizes(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                s.SCHEMA_NAME AS schema_name,
+                COALESCE(SUM(t.DATA_LENGTH + t.INDEX_LENGTH), 0) AS total_size_bytes
+            FROM INFORMATION_SCHEMA.SCHEMATA s
+            LEFT JOIN INFORMATION_SCHEMA.TABLES t 
+                ON s.SCHEMA_NAME = t.TABLE_SCHEMA
+            WHERE {self._system_schema_filter()}
+            GROUP BY s.SCHEMA_NAME
+            ORDER BY total_size_bytes DESC, s.SCHEMA_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "total_size_bytes": int(row.get("total_size_bytes") or 0),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #03: 3. Table-level storage analysis
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_table_level_storage_analysis()
+Headers     : Database, Table, Engine, Rows, Data (MB), Index (MB), Total (MB), Data (GB), Index (GB), Total (GB)
+Description : All tables by size ordered by (data_length + index_length) DESC.
+
+SQL Query / Implementation:
+```python
+def get_table_level_storage_analysis(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    engine, 
+    table_rows, 
+    ROUND(data_length / 1024 / 1024, 2) AS data_mb, 
+    ROUND(index_length / 1024 / 1024, 2) AS index_mb, 
+    ROUND((data_length + index_length) / 1024 / 1024, 2) AS total_mb, 
+    ROUND(data_length / 1024 / 1024 / 1024, 2) AS data_gb, 
+    ROUND(index_length / 1024 / 1024 / 1024, 2) AS index_gb, 
+    ROUND((data_length + index_length) / 1024 / 1024 / 1024, 2) AS total_gb 
+FROM information_schema.tables 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+ORDER BY (data_length + index_length) DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "engine_name": row.get("engine") or row.get("ENGINE") or "VIEW",
+                    "table_rows": (
+                        row.get("table_rows")
+                        if row.get("table_rows") is not None
+                        else (
+                            row.get("TABLE_ROWS")
+                            if row.get("TABLE_ROWS") is not None
+                            else 0
+                        )
+                    ),
+                    "data_mb": (
+                        row.get("data_mb")
+                        if row.get("data_mb") is not None
+                        else row.get("DATA_MB", 0.0)
+                    ),
+                    "index_mb": (
+                        row.get("index_mb")
+                        if row.get("index_mb") is not None
+                        else row.get("INDEX_MB", 0.0)
+                    ),
+                    "total_mb": (
+                        row.get("total_mb")
+                        if row.get("total_mb") is not None
+                        else row.get("TOTAL_MB", 0.0)
+                    ),
+                    "data_gb": (
+                        row.get("data_gb")
+                        if row.get("data_gb") is not None
+                        else row.get("DATA_GB", 0.0)
+                    ),
+                    "index_gb": (
+                        row.get("index_gb")
+                        if row.get("index_gb") is not None
+                        else row.get("INDEX_GB", 0.0)
+                    ),
+                    "total_gb": (
+                        row.get("total_gb")
+                        if row.get("total_gb") is not None
+                        else row.get("TOTAL_GB", 0.0)
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #04: 4. Data vs index storage
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_data_vs_index_footprint()
+Headers     : Data (MB), Index (MB), Total (MB), Data (GB), Index (GB), Total (GB), Data (TB), Index (TB), Total (TB)
+Description : Aggregated data vs index footprint across non-system schemas.
+
+SQL Query / Implementation:
+```python
+def get_data_vs_index_footprint(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT
+    ROUND(SUM(data_length) / 1024 / 1024, 2) AS data_mb,
+    ROUND(SUM(index_length) / 1024 / 1024, 2) AS index_mb,
+    ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS total_mb,
+    ROUND(SUM(data_length) / 1024 / 1024 / 1024, 4) AS data_gb,
+    ROUND(SUM(index_length) / 1024 / 1024 / 1024, 4) AS index_gb,
+    ROUND(SUM(data_length + index_length) / 1024 / 1024 / 1024, 4) AS total_gb,
+    ROUND(SUM(data_length) / 1024 / 1024 / 1024 / 1024, 6) AS data_tb,
+    ROUND(SUM(index_length) / 1024 / 1024 / 1024 / 1024, 6) AS index_tb,
+    ROUND(SUM(data_length + index_length) / 1024 / 1024 / 1024 / 1024, 6) AS total_tb
+FROM information_schema.tables
+WHERE table_schema NOT IN
+('information_schema','mysql','performance_schema','sys');
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            r = rows[0] if rows else {}
+            return [
+                {
+                    "data_mb": r.get("data_mb") or 0.0,
+                    "index_mb": r.get("index_mb") or 0.0,
+                    "total_mb": r.get("total_mb") or 0.0,
+                    "data_gb": r.get("data_gb") or 0.0,
+                    "index_gb": r.get("index_gb") or 0.0,
+                    "total_gb": r.get("total_gb") or 0.0,
+                    "data_tb": r.get("data_tb") or 0.0,
+                    "index_tb": r.get("index_tb") or 0.0,
+                    "total_tb": r.get("total_tb") or 0.0,
+                }
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #05: 5. Top 100 largest tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_top_100_largest_tables()
+Headers     : Database, Table, Engine, Total Size (MB), Total Size (GB)
+Description : Top 100 largest tables ordered by total storage size.
+
+SQL Query / Implementation:
+```python
+def get_top_100_largest_tables(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT
+    table_schema,
+    table_name,
+    engine,
+    ROUND((data_length + index_length) / 1024 / 1024, 2) AS total_mb,
+    ROUND((data_length + index_length) / 1024 / 1024 / 1024, 4) AS total_gb
+FROM information_schema.tables
+WHERE table_schema NOT IN ('information_schema','mysql','performance_schema','sys')
+AND table_type = 'BASE TABLE'
+ORDER BY (data_length + index_length) DESC
+LIMIT 100;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "engine_name": row.get("engine") or row.get("ENGINE"),
+                    "total_mb": (
+                        row.get("total_mb")
+                        if "total_mb" in row
+                        else row.get("TOTAL_MB", 0.0)
+                    ),
+                    "total_gb": (
+                        row.get("total_gb")
+                        if "total_gb" in row
+                        else row.get("TOTAL_GB", 0.0)
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #06: 6. Table row counts
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_table_row_counts()
+Headers     : Database, Table, Rows
+Description : MySQL row counts from information_schema.tables (estimates for InnoDB).
+
+SQL Query / Implementation:
+```python
+def get_table_row_counts(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT
+    table_schema,
+    table_name,
+    table_rows
+FROM information_schema.tables
+WHERE table_schema NOT IN
+('information_schema','mysql','performance_schema','sys')
+ORDER BY table_rows DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "row_count": (
+                        row.get("table_rows")
+                        if row.get("table_rows") is not None
+                        else (
+                            row.get("TABLE_ROWS")
+                            if row.get("TABLE_ROWS") is not None
+                            else 0
+                        )
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #07: 7. Storage breakdown by storage engine
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_storage_by_engine()
+Headers     : Engine, Table Count, Data (MB), Index (MB), Total (MB), Data (GB), Index (GB), Total (GB)
+Description : Breakdown of storage across storage engines (InnoDB, MyISAM, etc.).
+
+SQL Query / Implementation:
+```python
+def get_storage_by_engine(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    engine, 
+    COUNT(*) AS table_count, 
+    ROUND(SUM(data_length) / 1024 / 1024, 2) AS data_mb, 
+    ROUND(SUM(index_length) / 1024 / 1024, 2) AS index_mb, 
+    ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS total_mb, 
+    ROUND(SUM(data_length) / 1024 / 1024 / 1024, 2) AS data_gb, 
+    ROUND(SUM(index_length) / 1024 / 1024 / 1024, 2) AS index_gb, 
+    ROUND(SUM(data_length + index_length) / 1024 / 1024 / 1024, 2) AS total_gb 
+FROM information_schema.tables 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+GROUP BY engine 
+ORDER BY SUM(data_length + index_length) DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "engine_name": row.get("engine")
+                    or row.get("ENGINE")
+                    or "VIEW/NULL",
+                    "table_count": (
+                        row.get("table_count")
+                        if row.get("table_count") is not None
+                        else 0
+                    ),
+                    "data_mb": (
+                        row.get("data_mb") if row.get("data_mb") is not None else 0.0
+                    ),
+                    "index_mb": (
+                        row.get("index_mb") if row.get("index_mb") is not None else 0.0
+                    ),
+                    "total_mb": (
+                        row.get("total_mb") if row.get("total_mb") is not None else 0.0
+                    ),
+                    "data_gb": (
+                        row.get("data_gb") if row.get("data_gb") is not None else 0.0
+                    ),
+                    "index_gb": (
+                        row.get("index_gb") if row.get("index_gb") is not None else 0.0
+                    ),
+                    "total_gb": (
+                        row.get("total_gb") if row.get("total_gb") is not None else 0.0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #08: 8. Check tables that aren't InnoDB
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_non_innodb_tables()
+Headers     : Database, Table, Engine, Size (MB), Size (GB)
+Description : Tables using non-InnoDB engines (MyISAM, MEMORY, CSV, etc.).
+
+SQL Query / Implementation:
+```python
+def get_non_innodb_tables(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    engine, 
+    ROUND((data_length + index_length) / 1024 / 1024, 2) AS size_mb, 
+    ROUND((data_length + index_length) / 1024 / 1024 / 1024, 2) AS size_gb 
+FROM information_schema.tables 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+AND engine <> 'InnoDB' 
+ORDER BY (data_length + index_length) DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "engine_name": row.get("engine") or row.get("ENGINE") or "Other",
+                    "size_mb": (
+                        row.get("size_mb") if row.get("size_mb") is not None else 0.0
+                    ),
+                    "size_gb": (
+                        row.get("size_gb") if row.get("size_gb") is not None else 0.0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #09: Detailed Partition Configuration and Sizes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_detailed_partitions()
+Headers     : Database, Table, Partition, Method, Expression, Rows, Data Size, Index Size
+Description : Partition mapping and individual partition storage details.
+
+SQL Query / Implementation:
+```python
+def get_detailed_partitions(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                PARTITION_NAME AS partition_name,
+                PARTITION_METHOD AS partition_method,
+                PARTITION_EXPRESSION AS partition_expression,
+                TABLE_ROWS AS row_count,
+                DATA_LENGTH AS data_size_bytes,
+                INDEX_LENGTH AS index_size_bytes
+            FROM INFORMATION_SCHEMA.PARTITIONS
+            WHERE PARTITION_NAME IS NOT NULL
+              AND {self._system_table_filter('TABLE_SCHEMA')}
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, PARTITION_ORDINAL_POSITION
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "partition_name": row["partition_name"],
+                    "partition_method": row["partition_method"] or "-",
+                    "partition_expression": row["partition_expression"] or "-",
+                    "row_count": row["row_count"],
+                    "data_size_bytes": row["data_size_bytes"],
+                    "index_size_bytes": row["index_size_bytes"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #10: 10. Master (Parent) tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_master_tables()
+Headers     : Database, Master Table Name, Child FKs In, Referencing Child Tables
+Description : Tables referenced by foreign key constraints in child tables.
+
+SQL Query / Implementation:
+```python
+def get_master_tables(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                t.TABLE_SCHEMA AS schema_name,
+                t.TABLE_NAME AS table_name,
+                COALESCE(incoming.incoming_fk_count, 0) AS child_fk_count,
+                COALESCE(incoming.referencing_tables, '-') AS child_tables
+            FROM INFORMATION_SCHEMA.TABLES t
+            INNER JOIN (
+                SELECT 
+                    REFERENCED_TABLE_SCHEMA AS TABLE_SCHEMA,
+                    REFERENCED_TABLE_NAME AS TABLE_NAME,
+                    COUNT(DISTINCT TABLE_NAME) AS incoming_fk_count,
+                    GROUP_CONCAT(DISTINCT TABLE_NAME ORDER BY TABLE_NAME SEPARATOR ', ') AS referencing_tables
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE REFERENCED_TABLE_NAME IS NOT NULL
+                  AND {self._system_table_filter('REFERENCED_TABLE_SCHEMA')}
+                GROUP BY REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME
+            ) incoming ON t.TABLE_SCHEMA = incoming.TABLE_SCHEMA AND t.TABLE_NAME = incoming.TABLE_NAME
+            WHERE t.TABLE_TYPE = 'BASE TABLE'
+              AND {self._system_table_filter('t.TABLE_SCHEMA')}
+            ORDER BY incoming.incoming_fk_count DESC, t.TABLE_SCHEMA, t.TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("schema_name") or "-",
+                    "table_name": row.get("table_name") or "-",
+                    "child_fk_count": int(row.get("child_fk_count") or 0),
+                    "child_tables": row.get("child_tables") or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #11: 11. Child tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_child_tables()
+Headers     : Database, Child Table Name, Parent FKs Out, Referenced Parent Tables
+Description : Tables containing foreign key constraints pointing to parent tables.
+
+SQL Query / Implementation:
+```python
+def get_child_tables(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                t.TABLE_SCHEMA AS schema_name,
+                t.TABLE_NAME AS table_name,
+                COALESCE(outgoing.outgoing_fk_count, 0) AS parent_fk_count,
+                COALESCE(outgoing.referenced_tables, '-') AS parent_tables
+            FROM INFORMATION_SCHEMA.TABLES t
+            INNER JOIN (
+                SELECT 
+                    TABLE_SCHEMA,
+                    TABLE_NAME,
+                    COUNT(DISTINCT REFERENCED_TABLE_NAME) AS outgoing_fk_count,
+                    GROUP_CONCAT(DISTINCT REFERENCED_TABLE_NAME ORDER BY REFERENCED_TABLE_NAME SEPARATOR ', ') AS referenced_tables
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE REFERENCED_TABLE_NAME IS NOT NULL
+                  AND {self._system_table_filter('TABLE_SCHEMA')}
+                GROUP BY TABLE_SCHEMA, TABLE_NAME
+            ) outgoing ON t.TABLE_SCHEMA = outgoing.TABLE_SCHEMA AND t.TABLE_NAME = outgoing.TABLE_NAME
+            WHERE t.TABLE_TYPE = 'BASE TABLE'
+              AND {self._system_table_filter('t.TABLE_SCHEMA')}
+            ORDER BY outgoing.outgoing_fk_count DESC, t.TABLE_SCHEMA, t.TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("schema_name") or "-",
+                    "table_name": row.get("table_name") or "-",
+                    "parent_fk_count": int(row.get("parent_fk_count") or 0),
+                    "parent_tables": row.get("parent_tables") or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #12: 12. Independent tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_independent_tables()
+Headers     : Database, Independent Table Name
+Description : Standalone tables with no foreign key relationships (neither parent nor child).
+
+SQL Query / Implementation:
+```python
+def get_independent_tables(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                t.TABLE_SCHEMA AS schema_name,
+                t.TABLE_NAME AS table_name
+            FROM INFORMATION_SCHEMA.TABLES t
+            LEFT JOIN (
+                SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE REFERENCED_TABLE_NAME IS NOT NULL
+                  AND {self._system_table_filter('TABLE_SCHEMA')}
+            ) outgoing ON t.TABLE_SCHEMA = outgoing.TABLE_SCHEMA AND t.TABLE_NAME = outgoing.TABLE_NAME
+            LEFT JOIN (
+                SELECT DISTINCT REFERENCED_TABLE_SCHEMA AS TABLE_SCHEMA, REFERENCED_TABLE_NAME AS TABLE_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE REFERENCED_TABLE_NAME IS NOT NULL
+                  AND {self._system_table_filter('REFERENCED_TABLE_SCHEMA')}
+            ) incoming ON t.TABLE_SCHEMA = incoming.TABLE_SCHEMA AND t.TABLE_NAME = incoming.TABLE_NAME
+            WHERE t.TABLE_TYPE = 'BASE TABLE'
+              AND {self._system_table_filter('t.TABLE_SCHEMA')}
+              AND outgoing.TABLE_NAME IS NULL
+              AND incoming.TABLE_NAME IS NULL
+            ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("schema_name") or "-",
+                    "table_name": row.get("table_name") or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #13: 10. Identify very large unpartitioned tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_large_unpartitioned_tables()
+Headers     : Database, Table, Size (MB), Size (GB)
+Description : Unpartitioned tables sorted by total size for partitioning review.
+
+SQL Query / Implementation:
+```python
+def get_large_unpartitioned_tables(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    ROUND((data_length + index_length) / 1024 / 1024, 2) AS size_mb, 
+    ROUND((data_length + index_length) / 1024 / 1024 / 1024, 2) AS size_gb 
+FROM information_schema.tables 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+AND table_name NOT IN ( 
+    SELECT DISTINCT table_name 
+    FROM information_schema.partitions 
+    WHERE partition_name IS NOT NULL 
+) 
+ORDER BY (data_length + index_length) DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "size_mb": (
+                        row.get("size_mb") if row.get("size_mb") is not None else 0.0
+                    ),
+                    "size_gb": (
+                        row.get("size_gb") if row.get("size_gb") is not None else 0.0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #14: BLOB and TEXT Large Object Columns
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_large_object_columns()
+Headers     : Database, Table, Column, Data Type, Column Type
+Description : Columns with BLOB, TEXT, or LONGTEXT data types.
+
+SQL Query / Implementation:
+```python
+def get_large_object_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                COLUMN_NAME AS column_name,
+                DATA_TYPE AS data_type,
+                COLUMN_TYPE AS column_type
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE {self._system_table_filter('TABLE_SCHEMA')}
+              AND DATA_TYPE IN ('tinyblob', 'blob', 'mediumblob', 'longblob', 'tinytext', 'text', 'mediumtext', 'longtext')
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "column_name": row["column_name"],
+                    "data_type": row["data_type"],
+                    "column_type": row["column_type"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #15: JSON Data Type Columns Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_json_columns()
+Headers     : Database, Table, Column, Column Type
+Description : Columns explicitly defined with JSON data type.
+
+SQL Query / Implementation:
+```python
+def get_json_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                COLUMN_NAME AS column_name,
+                COLUMN_TYPE AS column_type
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE DATA_TYPE = 'json'
+              AND {self._system_table_filter('TABLE_SCHEMA')}
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "column_name": row["column_name"],
+                    "column_type": row["column_type"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #16: 14. Find generated columns
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_generated_columns()
+Headers     : Database, Table, Column Name, Generation Expression
+Description : Generated and virtual column definitions from information_schema.columns.
+
+SQL Query / Implementation:
+```python
+def get_generated_columns(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    column_name, 
+    generation_expression 
+FROM information_schema.columns 
+WHERE generation_expression IS NOT NULL 
+  AND generation_expression <> '' 
+  AND table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+ORDER BY table_schema, table_name, column_name;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "column_name": row.get("column_name") or row.get("COLUMN_NAME"),
+                    "generation_expression": row.get("generation_expression")
+                    or row.get("GENERATION_EXPRESSION")
+                    or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #17: Primary Keys Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_primary_keys()
+Headers     : Database, Table, Primary Key Columns
+Description : Tables with defined PRIMARY KEY constraints.
+
+SQL Query / Implementation:
+```python
+def get_primary_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ', ') AS primary_key_columns
+            FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE INDEX_NAME = 'PRIMARY'
+              AND {self._system_table_filter('TABLE_SCHEMA')}
+            GROUP BY TABLE_SCHEMA, TABLE_NAME
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "primary_key_columns": row["primary_key_columns"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #18: Tables Without Primary Keys
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_tables_without_primary_keys()
+Headers     : Database, Table
+Description : Base tables created without a Primary Key constraint.
+
+SQL Query / Implementation:
+```python
+def get_tables_without_primary_keys(self) -> List[Dict[str, Any]]:
+        return self.get_tables_without_clustered_indexes()
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #19: 17. All indexes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_index_sizes()
+Headers     : Database, Table, Index Name, Non Unique, Index Type, Columns
+Description : Complete index inventory from information_schema.statistics.
+
+SQL Query / Implementation:
+```python
+def get_index_sizes(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    index_name, 
+    non_unique, 
+    index_type, 
+    GROUP_CONCAT( 
+        column_name 
+        ORDER BY seq_in_index 
+    ) AS columns 
+FROM information_schema.statistics 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+GROUP BY 
+    table_schema, 
+    table_name, 
+    index_name, 
+    non_unique, 
+    index_type 
+ORDER BY table_schema, table_name, index_name;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "index_name": row.get("index_name") or row.get("INDEX_NAME"),
+                    "non_unique": (
+                        row.get("non_unique")
+                        if row.get("non_unique") is not None
+                        else row.get("NON_UNIQUE")
+                    ),
+                    "index_type": row.get("index_type") or row.get("INDEX_TYPE"),
+                    "columns": row.get("columns") or row.get("COLUMNS") or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #20: 18. Index count by table
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_tables_high_index_count()
+Headers     : Database, Table, Index Count
+Description : Number of indexes per table from information_schema.statistics.
+
+SQL Query / Implementation:
+```python
+def get_tables_high_index_count(self, threshold: int = 5) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    COUNT(DISTINCT index_name) AS index_count 
+FROM information_schema.statistics 
+WHERE table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+GROUP BY table_schema, table_name 
+ORDER BY index_count DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "index_count": (
+                        row.get("index_count")
+                        if row.get("index_count") is not None
+                        else 0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #21: 19. Largest indexes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_largest_indexes()
+Headers     : Database, Table, Index Size (MB), Index Size (GB)
+Description : Top 100 tables with largest index storage overhead.
+
+SQL Query / Implementation:
+```python
+def get_largest_indexes(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT
+    table_schema,
+    table_name,
+    ROUND(index_length / 1024 / 1024, 2) AS index_mb,
+    ROUND(index_length / 1024 / 1024 / 1024, 4) AS index_gb
+FROM information_schema.tables
+WHERE table_schema NOT IN ('information_schema','mysql','performance_schema','sys')
+ORDER BY index_length DESC
+LIMIT 100;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "index_mb": (
+                        row.get("index_mb")
+                        if "index_mb" in row
+                        else row.get("INDEX_MB", 0.0)
+                    ),
+                    "index_gb": (
+                        row.get("index_gb")
+                        if "index_gb" in row
+                        else row.get("INDEX_GB", 0.0)
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #22: 20. Foreign key constraints
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_foreign_keys()
+Headers     : Database, Table, Constraint, Column, Ref Database, Ref Table, Ref Column, Pos
+Description : Foreign key referential relationships from information_schema.key_column_usage.
+
+SQL Query / Implementation:
+```python
+def get_foreign_keys(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    constraint_schema, 
+    table_name, 
+    constraint_name, 
+    column_name, 
+    referenced_table_schema, 
+    referenced_table_name, 
+    referenced_column_name, 
+    ordinal_position 
+FROM information_schema.key_column_usage 
+WHERE referenced_table_name IS NOT NULL 
+  AND constraint_schema NOT IN ('information_schema','mysql','performance_schema','sys') 
+ORDER BY 
+    constraint_schema, 
+    table_name, 
+    constraint_name, 
+    ordinal_position;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("constraint_schema")
+                    or row.get("CONSTRAINT_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "constraint_name": row.get("constraint_name")
+                    or row.get("CONSTRAINT_NAME"),
+                    "column_name": row.get("column_name") or row.get("COLUMN_NAME"),
+                    "ref_schema": row.get("referenced_table_schema")
+                    or row.get("REFERENCED_TABLE_SCHEMA"),
+                    "ref_table": row.get("referenced_table_name")
+                    or row.get("REFERENCED_TABLE_NAME"),
+                    "ref_column": row.get("referenced_column_name")
+                    or row.get("REFERENCED_COLUMN_NAME"),
+                    "ordinal_position": (
+                        row.get("ordinal_position")
+                        if row.get("ordinal_position") is not None
+                        else row.get("ORDINAL_POSITION")
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #23: Tables Labeled by High Foreign Key Dependencies
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_tables_many_foreign_keys()
+Headers     : Database, Table, Foreign Keys Count
+Description : Tables ordered by foreign key reference density.
+
+SQL Query / Implementation:
+```python
+def get_tables_many_foreign_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                CONSTRAINT_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                COUNT(DISTINCT CONSTRAINT_NAME) AS foreign_key_count
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            WHERE REFERENCED_TABLE_NAME IS NOT NULL
+              AND {self._system_table_filter('CONSTRAINT_SCHEMA')}
+            GROUP BY CONSTRAINT_SCHEMA, TABLE_NAME
+            ORDER BY foreign_key_count DESC, CONSTRAINT_SCHEMA, TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "foreign_key_count": row["foreign_key_count"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #24: Unique Constraints and Indexes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_unique_constraints()
+Headers     : Database, Table, Index Name, Unique Columns
+Description : Enforced unique constraint indexes.
+
+SQL Query / Implementation:
+```python
+def get_unique_constraints(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                INDEX_NAME AS index_name,
+                GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ', ') AS unique_columns
+            FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE NON_UNIQUE = 0
+              AND {self._system_table_filter('TABLE_SCHEMA')}
+            GROUP BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "index_name": row["index_name"],
+                    "unique_columns": row["unique_columns"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #25: 23. Potential duplicate indexes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_duplicate_indexes()
+Headers     : Database, Table, Index Columns, Count, Duplicate Indexes
+Description : Tables with multiple indexes covering the exact same sequence of columns.
+
+SQL Query / Implementation:
+```python
+def get_duplicate_indexes(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    index_columns, 
+    COUNT(*) AS duplicate_count, 
+    GROUP_CONCAT(index_name ORDER BY index_name SEPARATOR ', ') AS indexes 
+FROM (
+    SELECT 
+        table_schema, 
+        table_name, 
+        index_name, 
+        GROUP_CONCAT( 
+            column_name 
+            ORDER BY seq_in_index 
+            SEPARATOR ',' 
+        ) AS index_columns 
+    FROM information_schema.statistics 
+    WHERE table_schema NOT IN ( 
+        'information_schema', 
+        'mysql', 
+        'performance_schema', 
+        'sys' 
+    ) 
+    GROUP BY 
+        table_schema, 
+        table_name, 
+        index_name 
+) AS sub_indexes 
+GROUP BY 
+    table_schema, 
+    table_name, 
+    index_columns 
+HAVING COUNT(*) > 1 
+ORDER BY 
+    table_schema, 
+    table_name;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "index_columns": row.get("index_columns")
+                    or row.get("INDEX_COLUMNS")
+                    or "-",
+                    "duplicate_count": (
+                        row.get("duplicate_count")
+                        if row.get("duplicate_count") is not None
+                        else row.get("DUPLICATE_COUNT", 0)
+                    ),
+                    "indexes": row.get("indexes") or row.get("INDEXES") or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #26: AUTO_INCREMENT Column Specifications
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_auto_increment_columns()
+Headers     : Database, Table, Column, Column Type, Specification
+Description : Auto-increment primary keys and surrogate identifier columns.
+
+SQL Query / Implementation:
+```python
+def get_auto_increment_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                COLUMN_NAME AS column_name,
+                COLUMN_TYPE AS column_type,
+                EXTRA AS extra_info
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE EXTRA LIKE '%auto_increment%'
+              AND {self._system_table_filter('TABLE_SCHEMA')}
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "column_name": row["column_name"],
+                    "column_type": row["column_type"],
+                    "extra_info": row["extra_info"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #27: Find Tables with Different Collations
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_tables_with_different_collations()
+Headers     : Database Schema, Table Collation, Table Count
+Description : Distribution of table collation settings across schemas.
+
+SQL Query / Implementation:
+```python
+def get_tables_with_different_collations(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                TABLE_SCHEMA AS schema_name, 
+                TABLE_COLLATION AS table_collation, 
+                COUNT(*) AS table_count 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_TYPE = 'BASE TABLE'
+              AND {self._system_table_filter('TABLE_SCHEMA')} 
+            GROUP BY TABLE_SCHEMA, TABLE_COLLATION 
+            ORDER BY TABLE_SCHEMA, table_count DESC
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_collation": row["table_collation"] or "-",
+                    "table_count": row["table_count"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #28: Table Comments and Documentation
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_table_comments()
+Headers     : Database, Table, Comment / Description
+Description : Documented table comments in schema metadata.
+
+SQL Query / Implementation:
+```python
+def get_table_comments(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                TABLE_COMMENT AS table_comment
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+              AND TABLE_COMMENT IS NOT NULL
+              AND TABLE_COMMENT <> ''
+              AND {self._system_table_filter()}
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "table_comment": row["table_comment"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #29: Stored Procedures and Routines Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_stored_procedures()
+Headers     : Database, Routine Name, Type, Return Type, Created, Last Altered
+Description : Programmability routines (PROCEDURE / FUNCTION).
+
+SQL Query / Implementation:
+```python
+def get_stored_procedures(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                ROUTINE_SCHEMA AS schema_name,
+                ROUTINE_NAME AS routine_name,
+                ROUTINE_TYPE AS routine_type,
+                DATA_TYPE AS return_type,
+                CREATED AS created_time,
+                LAST_ALTERED AS last_altered
+            FROM INFORMATION_SCHEMA.ROUTINES
+            WHERE {self._system_table_filter('ROUTINE_SCHEMA')}
+            ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "routine_name": row["routine_name"],
+                    "routine_type": row["routine_type"],
+                    "return_type": row["return_type"] or "-",
+                    "created_time": row["created_time"],
+                    "last_altered": row["last_altered"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #30: Database Views Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_views_inventory()
+Headers     : Database, View Name
+Description : Logical views defined in schema metadata.
+
+SQL Query / Implementation:
+```python
+def get_views_inventory(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS view_name
+            FROM INFORMATION_SCHEMA.VIEWS
+            WHERE {self._system_table_filter('TABLE_SCHEMA')}
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "view_name": row["view_name"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #31: Database Triggers Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_triggers_inventory()
+Headers     : Trigger Schema, Trigger Name, Target Schema, Target Table, Event Manipulation, Action Timing, Action Statement
+Description : Event-driven database triggers details.
+
+SQL Query / Implementation:
+```python
+def get_triggers_inventory(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                TRIGGER_SCHEMA AS trigger_schema,
+                TRIGGER_NAME AS trigger_name,
+                EVENT_OBJECT_SCHEMA AS event_object_schema,
+                EVENT_OBJECT_TABLE AS event_object_table,
+                EVENT_MANIPULATION AS event_manipulation,
+                ACTION_TIMING AS action_timing,
+                ACTION_STATEMENT AS action_statement
+            FROM INFORMATION_SCHEMA.TRIGGERS
+            WHERE {self._system_table_filter('TRIGGER_SCHEMA')}
+            ORDER BY TRIGGER_SCHEMA, EVENT_OBJECT_TABLE
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "trigger_schema": row["trigger_schema"],
+                    "trigger_name": row["trigger_name"],
+                    "event_object_schema": row["event_object_schema"],
+                    "event_object_table": row["event_object_table"],
+                    "event_manipulation": row["event_manipulation"],
+                    "action_timing": row["action_timing"],
+                    "action_statement": row["action_statement"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #32: Scheduled Events Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_scheduled_events()
+Headers     : Event Schema, Event Name, Status, Event Type, Execute At, Interval Value, Interval Field, Last Executed
+Description : MySQL Event Scheduler background tasks inventory.
+
+SQL Query / Implementation:
+```python
+def get_scheduled_events(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                EVENT_SCHEMA AS event_schema,
+                EVENT_NAME AS event_name,
+                STATUS AS status,
+                EVENT_TYPE AS event_type,
+                EXECUTE_AT AS execute_at,
+                INTERVAL_VALUE AS interval_value,
+                INTERVAL_FIELD AS interval_field,
+                LAST_EXECUTED AS last_executed
+            FROM INFORMATION_SCHEMA.EVENTS
+            WHERE {self._system_table_filter('EVENT_SCHEMA')}
+            ORDER BY EVENT_SCHEMA, EVENT_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "event_schema": row["event_schema"],
+                    "event_name": row["event_name"],
+                    "status": row["status"],
+                    "event_type": row["event_type"],
+                    "execute_at": row["execute_at"] or "-",
+                    "interval_value": row["interval_value"] or "-",
+                    "interval_field": row["interval_field"] or "-",
+                    "last_executed": row["last_executed"] or "Never",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #33: Database User Accounts and Security Inventory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_user_accounts()
+Headers     : User, Host, Plugin, Account Locked, Password Expired
+Description : User authentication accounts configured in mysql.user.
+
+SQL Query / Implementation:
+```python
+def get_user_accounts(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                User AS user_name,
+                Host AS host_name,
+                plugin AS plugin_name,
+                account_locked AS account_locked,
+                password_expired AS password_expired
+            FROM mysql.user
+            ORDER BY User, Host
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "user_name": row["user_name"],
+                    "host_name": row["host_name"],
+                    "plugin_name": row["plugin_name"],
+                    "account_locked": row["account_locked"],
+                    "password_expired": row["password_expired"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #34: InnoDB Buffer Pool Configuration and Status
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_buffer_pool_status()
+Headers     : Type, Metric / Variable Name, Value
+Description : InnoDB buffer pool variables and runtime status metrics.
+
+SQL Query / Implementation:
+```python
+def get_buffer_pool_status(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW VARIABLES LIKE 'innodb_buffer_pool%'")
+            for row in cursor.fetchall():
+                results.append(
+                    {
+                        "setting_type": "Variable",
+                        "metric_name": row[0],
+                        "setting_value": str(row[1]),
+                    }
+                )
+            cursor.execute("SHOW STATUS LIKE 'Innodb_buffer_pool%'")
+            for row in cursor.fetchall():
+                results.append(
+                    {
+                        "setting_type": "Status",
+                        "metric_name": row[0],
+                        "setting_value": str(row[1]),
+                    }
+                )
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #35: Temporary Tables Global Status Metrics
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_temporary_tables_status()
+Headers     : Metric Name, Metric Value
+Description : Created_tmp_tables, Created_tmp_disk_tables, and Created_tmp_files metrics.
+
+SQL Query / Implementation:
+```python
+def get_temporary_tables_status(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW GLOBAL STATUS LIKE 'Created_tmp%'")
+            for row in cursor.fetchall():
+                results.append({"metric_name": row[0], "metric_value": str(row[1])})
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #36: Connections and Thread Activity Status
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_connection_thread_status()
+Headers     : Metric / Variable Name, Value
+Description : Threads connected, Threads running, and max_connections settings.
+
+SQL Query / Implementation:
+```python
+def get_connection_thread_status(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW GLOBAL STATUS LIKE 'Threads%'")
+            for row in cursor.fetchall():
+                results.append({"metric_name": row[0], "metric_value": str(row[1])})
+            cursor.execute("SHOW VARIABLES LIKE 'max_connections'")
+            for row in cursor.fetchall():
+                results.append({"metric_name": row[0], "metric_value": str(row[1])})
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #37: Active InnoDB Transactions
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_active_transactions()
+Headers     : Trx ID, Started, Duration (s), State, Rows Locked, Rows Modified
+Description : Currently executing transactions in InnoDB.
+
+SQL Query / Implementation:
+```python
+def get_active_transactions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                trx_id AS transaction_id,
+                trx_started AS started_time,
+                TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS duration_sec,
+                trx_state AS state,
+                trx_rows_locked AS rows_locked,
+                trx_rows_modified AS rows_modified
+            FROM INFORMATION_SCHEMA.INNODB_TRX
+            ORDER BY trx_started
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "transaction_id": row["transaction_id"],
+                    "started_time": row["started_time"],
+                    "duration_sec": row["duration_sec"],
+                    "state": row["state"],
+                    "rows_locked": row["rows_locked"],
+                    "rows_modified": row["rows_modified"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #38: 42. Long-running transactions
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_long_running_transactions()
+Headers     : Trx ID, Started, Duration (s), State, Tables Locked, Rows Locked, Rows Modified
+Description : InnoDB active transactions ordered by oldest start time.
+
+SQL Query / Implementation:
+```python
+def get_long_running_transactions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                trx_id AS transaction_id,
+                trx_started AS started_time,
+                TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS duration_seconds,
+                trx_state AS state,
+                trx_tables_locked AS tables_locked,
+                trx_rows_locked AS rows_locked,
+                trx_rows_modified AS rows_modified
+            FROM INFORMATION_SCHEMA.INNODB_TRX
+            ORDER BY trx_started ASC
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "transaction_id": row["transaction_id"],
+                    "started_time": row["started_time"],
+                    "duration_seconds": row["duration_seconds"],
+                    "state": row["state"],
+                    "tables_locked": row["tables_locked"],
+                    "rows_locked": row["rows_locked"],
+                    "rows_modified": row["rows_modified"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #39: Active Data Locks and Lock Waits
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_data_locks()
+Headers     : Lock ID, Database, Table, Type, Mode, Status, Lock Data
+Description : Currently held locks and waiting transactions in performance_schema.data_locks.
+
+SQL Query / Implementation:
+```python
+def get_data_locks(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                ENGINE_LOCK_ID AS lock_id,
+                OBJECT_SCHEMA AS schema_name,
+                OBJECT_NAME AS table_name,
+                LOCK_TYPE AS lock_type,
+                LOCK_MODE AS lock_mode,
+                LOCK_STATUS AS lock_status,
+                LOCK_DATA AS lock_data
+            FROM performance_schema.data_locks
+            WHERE {self._system_table_filter('OBJECT_SCHEMA')}
+            LIMIT 50
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "lock_id": row["lock_id"],
+                    "schema_name": row["schema_name"] or "-",
+                    "table_name": row["table_name"] or "-",
+                    "lock_type": row["lock_type"],
+                    "lock_mode": row["lock_mode"],
+                    "lock_status": row["lock_status"],
+                    "lock_data": row["lock_data"] or "-",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #40: 44. Deadlocks
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_deadlocks_info()
+Headers     : Metric / Event, Details / Value
+Description : innodb_print_all_deadlocks setting and LATEST DETECTED DEADLOCK status.
+
+SQL Query / Implementation:
+```python
+def get_deadlocks_info(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW VARIABLES LIKE 'innodb_print_all_deadlocks'")
+            for row in cursor.fetchall():
+                results.append(
+                    {
+                        "metric_name": row[0],
+                        "status_details": f"Setting Value: {row[1]}",
+                    }
+                )
+
+            cursor.execute("SHOW ENGINE INNODB STATUS")
+            row = cursor.fetchone()
+            if row and len(row) >= 3:
+                engine_status = str(row[2])
+                if "LATEST DETECTED DEADLOCK" in engine_status:
+                    deadlock_part = engine_status.split("LATEST DETECTED DEADLOCK")[
+                        1
+                    ].split("------------------------")[0]
+                    clean_text = " ".join(deadlock_part.strip().split())[:150]
+                    results.append(
+                        {
+                            "metric_name": "LATEST_DETECTED_DEADLOCK",
+                            "status_details": clean_text,
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "metric_name": "LATEST_DETECTED_DEADLOCK",
+                            "status_details": "No recent deadlock recorded in engine status.",
+                        }
+                    )
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #41: Slow Queries
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_slow_queries()
+Headers     : Digest Text, Count Star, Total Seconds, Avg Seconds, Sum Rows Examined, Sum Rows Sent
+Description : Slow queries from performance_schema.events_statements_summary_by_digest ranked by wait time.
+
+SQL Query / Implementation:
+```python
+def get_slow_queries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                DIGEST_TEXT, 
+                COUNT_STAR, 
+                SUM_TIMER_WAIT / 1000000000000 AS total_seconds, 
+                AVG_TIMER_WAIT / 1000000000000 AS avg_seconds, 
+                SUM_ROWS_EXAMINED, 
+                SUM_ROWS_SENT 
+            FROM performance_schema.events_statements_summary_by_digest 
+            WHERE {self._system_table_filter('SCHEMA_NAME')}
+              AND DIGEST_TEXT IS NOT NULL
+            ORDER BY SUM_TIMER_WAIT DESC 
+            LIMIT {limit}
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "digest_text": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "full_digest_text": row.get("DIGEST_TEXT") or "-",
+                    "count_star": row.get("COUNT_STAR", 0),
+                    "total_seconds": (
+                        round(float(row["total_seconds"]), 4)
+                        if row.get("total_seconds") is not None
+                        else 0.0
+                    ),
+                    "avg_seconds": (
+                        round(float(row["avg_seconds"]), 6)
+                        if row.get("avg_seconds") is not None
+                        else 0.0
+                    ),
+                    "sum_rows_examined": row.get("SUM_ROWS_EXAMINED", 0),
+                    "sum_rows_sent": row.get("SUM_ROWS_SENT", 0),
+                    "query_sample": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "exec_count": row.get("COUNT_STAR", 0),
+                    "total_time_sec": (
+                        round(float(row["total_seconds"]), 4)
+                        if row.get("total_seconds") is not None
+                        else 0.0
+                    ),
+                    "avg_time_ms": (
+                        round(float(row["avg_seconds"]) * 1000, 2)
+                        if row.get("avg_seconds") is not None
+                        else 0.0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #42: Top Queries Examining Huge Row Volumes
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_high_examined_rows_queries()
+Headers     : Digest Text, Count Star, Sum Rows Examined, Sum Rows Sent, Avg Rows Examined
+Description : Queries reading high numbers of rows relative to output from performance_schema.events_statements_summary_by_digest.
+
+SQL Query / Implementation:
+```python
+def get_high_examined_rows_queries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                DIGEST_TEXT, 
+                COUNT_STAR, 
+                SUM_ROWS_EXAMINED, 
+                SUM_ROWS_SENT, 
+                SUM_ROWS_EXAMINED / NULLIF(COUNT_STAR,0) AS avg_rows_examined 
+            FROM performance_schema.events_statements_summary_by_digest 
+            WHERE {self._system_table_filter('SCHEMA_NAME')}
+              AND DIGEST_TEXT IS NOT NULL
+            ORDER BY SUM_ROWS_EXAMINED DESC 
+            LIMIT {limit}
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "digest_text": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "full_digest_text": row.get("DIGEST_TEXT") or "-",
+                    "count_star": row.get("COUNT_STAR", 0),
+                    "sum_rows_examined": row.get("SUM_ROWS_EXAMINED", 0),
+                    "sum_rows_sent": row.get("SUM_ROWS_SENT", 0),
+                    "avg_rows_examined": (
+                        round(float(row["avg_rows_examined"]), 2)
+                        if row.get("avg_rows_examined") is not None
+                        else 0.0
+                    ),
+                    "query_sample": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "exec_count": row.get("COUNT_STAR", 0),
+                    "rows_examined": row.get("SUM_ROWS_EXAMINED", 0),
+                    "rows_sent": row.get("SUM_ROWS_SENT", 0),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #43: Most Frequently Executed Queries
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_frequent_executed_queries()
+Headers     : Digest Text, Count Star, Avg Time (ms)
+Description : Queries with highest cumulative execution count from performance_schema.events_statements_summary_by_digest.
+
+SQL Query / Implementation:
+```python
+def get_frequent_executed_queries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT 
+                DIGEST_TEXT, 
+                COUNT_STAR, 
+                AVG_TIMER_WAIT / 1000000000 AS avg_ms 
+            FROM performance_schema.events_statements_summary_by_digest 
+            WHERE {self._system_table_filter('SCHEMA_NAME')}
+              AND DIGEST_TEXT IS NOT NULL
+            ORDER BY COUNT_STAR DESC 
+            LIMIT {limit}
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "digest_text": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "full_digest_text": row.get("DIGEST_TEXT") or "-",
+                    "count_star": row.get("COUNT_STAR", 0),
+                    "avg_ms": (
+                        round(float(row["avg_ms"]), 4)
+                        if row.get("avg_ms") is not None
+                        else 0.0
+                    ),
+                    "query_sample": (
+                        (row["DIGEST_TEXT"][:60] + "...")
+                        if row.get("DIGEST_TEXT") and len(row["DIGEST_TEXT"]) > 60
+                        else (row.get("DIGEST_TEXT") or "-")
+                    ),
+                    "exec_count": row.get("COUNT_STAR", 0),
+                    "avg_time_ms": (
+                        round(float(row["avg_ms"]), 4)
+                        if row.get("avg_ms") is not None
+                        else 0.0
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #44: 48. Table I/O activity
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_table_io_activity()
+Headers     : Database, Table, Reads, Writes, Fetches, Inserts, Updates, Deletes
+Description : Top 100 tables ranked by total read and write I/O activity.
+
+SQL Query / Implementation:
+```python
+def get_table_io_activity(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                OBJECT_SCHEMA AS schema_name,
+                OBJECT_NAME AS table_name,
+                COUNT_READ AS count_read,
+                COUNT_WRITE AS count_write,
+                COUNT_FETCH AS count_fetch,
+                COUNT_INSERT AS count_insert,
+                COUNT_UPDATE AS count_update,
+                COUNT_DELETE AS count_delete
+            FROM performance_schema.table_io_waits_summary_by_table
+            WHERE {self._system_table_filter('OBJECT_SCHEMA')}
+            ORDER BY (COUNT_READ + COUNT_WRITE) DESC
+            LIMIT 100
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "count_read": row["count_read"],
+                    "count_write": row["count_write"],
+                    "count_fetch": row["count_fetch"],
+                    "count_insert": row["count_insert"],
+                    "count_update": row["count_update"],
+                    "count_delete": row["count_delete"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #45: 49. Table wait time
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_table_wait_times()
+Headers     : Database, Table, Total Ops, Wait Time (s)
+Description : Tables experiencing highest total I/O wait latency.
+
+SQL Query / Implementation:
+```python
+def get_table_wait_times(self, limit: int = 100) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                OBJECT_SCHEMA AS schema_name,
+                OBJECT_NAME AS table_name,
+                COUNT_STAR AS total_ops,
+                SUM_TIMER_WAIT / 1000000000000 AS wait_sec
+            FROM performance_schema.table_io_waits_summary_by_table
+            WHERE {self._system_table_filter('OBJECT_SCHEMA')}
+            ORDER BY SUM_TIMER_WAIT DESC
+            LIMIT {limit}
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "total_ops": row["total_ops"],
+                    "wait_sec": row["wait_sec"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #46: 50. Replication status
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_replication_status()
+Headers     : Node Role, Replication State
+Description : Source/Primary and Replica thread status.
+
+SQL Query / Implementation:
+```python
+def get_replication_status(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            try:
+                cursor.execute("SHOW REPLICA STATUS")
+                rows = cursor.fetchall()
+                for row in rows:
+                    results.append(
+                        {
+                            "role": "Replica",
+                            "status_info": f"Source_Host: {row.get('Source_Host','-')}, Slave_IO_Running: {row.get('Slave_IO_Running','-')}, Slave_SQL_Running: {row.get('Slave_SQL_Running','-')}",
+                        }
+                    )
+            except Exception:
+                try:
+                    cursor.execute("SHOW SLAVE STATUS")
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        results.append(
+                            {
+                                "role": "Slave",
+                                "status_info": f"Master_Host: {row.get('Master_Host','-')}, Slave_IO_Running: {row.get('Slave_IO_Running','-')}, Slave_SQL_Running: {row.get('Slave_SQL_Running','-')}",
+                            }
+                        )
+                except Exception:
+                    pass
+            if not results:
+                results.append(
+                    {
+                        "role": "Source/Standalone",
+                        "status_info": "Server operating as primary source / standalone node.",
+                    }
+                )
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #47: 51. Binary log configuration
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_binlog_config()
+Headers     : Configuration Variable, Value
+Description : log_bin, binlog_format, expire_logs, max_binlog_size.
+
+SQL Query / Implementation:
+```python
+def get_binlog_config(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SHOW VARIABLES WHERE Variable_name IN ('log_bin', 'binlog_format', 'binlog_expire_logs_seconds', 'max_binlog_size')"
+            )
+            for row in cursor.fetchall():
+                results.append({"variable_name": row[0], "setting_value": str(row[1])})
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #48: 52. GTID
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_gtid_info()
+Headers     : GTID Property, Value
+Description : Global Transaction Identifier configuration and executed GTID sets.
+
+SQL Query / Implementation:
+```python
+def get_gtid_info(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW VARIABLES LIKE 'gtid%'")
+            for row in cursor.fetchall():
+                results.append({"property_name": row[0], "property_value": str(row[1])})
+            try:
+                cursor.execute("SELECT @@GLOBAL.gtid_executed")
+                val = cursor.fetchone()
+                if val:
+                    results.append(
+                        {
+                            "property_name": "gtid_executed",
+                            "property_value": str(val[0])[:100],
+                        }
+                    )
+            except Exception:
+                pass
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #49: 53. Binary log size
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_binary_logs_info()
+Headers     : Log File Name, File Size
+Description : Replication binary log files recorded on server.
+
+SQL Query / Implementation:
+```python
+def get_binary_logs_info(self) -> List[Dict[str, Any]]:
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute("SHOW BINARY LOGS")
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "log_name": row.get("Log_name", "-"),
+                    "file_size": row.get("File_size", 0),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #50: 54. InnoDB tablespaces
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_innodb_tablespaces()
+Headers     : Space ID, Tablespace Name, Space Type, Row Format, State
+Description : InnoDB tablespaces inventory from information_schema.innodb_tablespaces.
+
+SQL Query / Implementation:
+```python
+def get_innodb_tablespaces(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT
+    SPACE,
+    NAME,
+    SPACE_TYPE,
+    ROW_FORMAT,
+    STATE
+FROM information_schema.innodb_tablespaces;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "space_id": (
+                        row.get("SPACE") if "SPACE" in row else row.get("space")
+                    ),
+                    "tablespace_name": row.get("NAME") or row.get("name"),
+                    "space_type": row.get("SPACE_TYPE") or row.get("space_type"),
+                    "row_format": row.get("ROW_FORMAT") or row.get("row_format"),
+                    "state": row.get("STATE") or row.get("state"),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #51: 56. File-per-table configuration
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_file_per_table_config()
+Headers     : Setting, Value
+Description : innodb_file_per_table setting.
+
+SQL Query / Implementation:
+```python
+def get_file_per_table_config(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW VARIABLES LIKE 'innodb_file_per_table'")
+            for row in cursor.fetchall():
+                results.append({"setting_name": row[0], "setting_value": str(row[1])})
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #52: 57. MySQL data directory
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_datadir_info()
+Headers     : Directory Setting, Path
+Description : Datadir path.
+
+SQL Query / Implementation:
+```python
+def get_datadir_info(self) -> List[Dict[str, Any]]:
+        results = []
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SHOW VARIABLES LIKE 'datadir'")
+            for row in cursor.fetchall():
+                results.append({"setting_name": row[0], "setting_value": str(row[1])})
+            cursor.close()
+        except Exception:
+            pass
+        return results
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #53: 62. Identify tables that haven't been used
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_least_active_tables()
+Headers     : Database, Table, Reads, Writes, Total I/O Ops
+Description : Tables with lowest read/write activity for obsolence assessment.
+
+SQL Query / Implementation:
+```python
+def get_least_active_tables(self, limit: int = 10) -> List[Dict[str, Any]]:
+        query = """
+            SELECT 
+                OBJECT_SCHEMA, 
+                OBJECT_NAME, 
+                COUNT_READ, 
+                COUNT_WRITE 
+            FROM performance_schema.table_io_waits_summary_by_table 
+            WHERE OBJECT_SCHEMA NOT IN 
+            ('mysql','performance_schema','information_schema','sys') 
+            ORDER BY 
+                (COUNT_READ + COUNT_WRITE)
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            result = []
+            for row in rows:
+                schema_name = row.get("OBJECT_SCHEMA") or row.get("schema_name")
+                table_name = row.get("OBJECT_NAME") or row.get("table_name")
+                count_read = (
+                    row.get("COUNT_READ")
+                    if "COUNT_READ" in row
+                    else row.get("count_read", 0)
+                )
+                count_write = (
+                    row.get("COUNT_WRITE")
+                    if "COUNT_WRITE" in row
+                    else row.get("count_write", 0)
+                )
+                total_ops = (count_read or 0) + (count_write or 0)
+                result.append(
+                    {
+                        "schema_name": schema_name,
+                        "table_name": table_name,
+                        "count_read": count_read,
+                        "count_write": count_write,
+                        "total_ops": total_ops,
+                    }
+                )
+            return result
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #54: 63. Identify hot tables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_hot_tables()
+Headers     : Database, Table, Reads, Writes, Inserts, Updates, Deletes, Total I/O Ops
+Description : Top active workload tables ranked by total read/write I/O operations.
+
+SQL Query / Implementation:
+```python
+def get_hot_tables(self, limit: int = 100) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                OBJECT_SCHEMA AS schema_name,
+                OBJECT_NAME AS table_name,
+                COUNT_READ AS count_read,
+                COUNT_WRITE AS count_write,
+                COUNT_FETCH AS count_fetch,
+                COUNT_INSERT AS count_insert,
+                COUNT_UPDATE AS count_update,
+                COUNT_DELETE AS count_delete,
+                (COUNT_READ + COUNT_WRITE) AS total_ops
+            FROM performance_schema.table_io_waits_summary_by_table
+            WHERE {self._system_table_filter('OBJECT_SCHEMA')}
+            ORDER BY total_ops DESC
+            LIMIT {limit}
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "table_name": row["table_name"],
+                    "count_read": row["count_read"],
+                    "count_write": row["count_write"],
+                    "count_fetch": row["count_fetch"],
+                    "count_insert": row["count_insert"],
+                    "count_update": row["count_update"],
+                    "count_delete": row["count_delete"],
+                    "total_ops": row["total_ops"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #55: Fragmentation Details
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_fragmentation_details()
+Headers     : Database, Table, Data Size, Fragmented Space, Fragmentation %
+Description : Tables with unused fragmented space (DATA_FREE).
+
+SQL Query / Implementation:
+```python
+def get_fragmentation_details(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    table_schema, 
+    table_name, 
+    data_length, 
+    index_length, 
+    data_free 
+FROM information_schema.tables 
+WHERE engine = 'InnoDB' 
+AND table_schema NOT IN 
+('information_schema','mysql','performance_schema','sys') 
+ORDER BY data_free DESC;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_schema": row.get("table_schema") or row.get("TABLE_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "data_size_bytes": row.get("data_length") if row.get("data_length") is not None else row.get("DATA_LENGTH", 0),
+                    "data_length": row.get("data_length") if row.get("data_length") is not None else row.get("DATA_LENGTH", 0),
+                    "index_size_bytes": row.get("index_length") if row.get("index_length") is not None else row.get("INDEX_LENGTH", 0),
+                    "index_length": row.get("index_length") if row.get("index_length") is not None else row.get("INDEX_LENGTH", 0),
+                    "fragmented_bytes": row.get("data_free") if row.get("data_free") is not None else row.get("DATA_FREE", 0),
+                    "data_free": row.get("data_free") if row.get("data_free") is not None else row.get("DATA_FREE", 0),
+                    "fragmentation_pct": round(
+                        (
+                            (row.get("data_free") if row.get("data_free") is not None else row.get("DATA_FREE", 0))
+                            / (
+                                (row.get("data_length") if row.get("data_length") is not None else row.get("DATA_LENGTH", 0))
+                                + (row.get("data_free") if row.get("data_free") is not None else row.get("DATA_FREE", 0))
+                            )
+                        )
+                        * 100,
+                        2,
+                    )
+                    if (
+                        (row.get("data_length") if row.get("data_length") is not None else row.get("DATA_LENGTH", 0))
+                        + (row.get("data_free") if row.get("data_free") is not None else row.get("DATA_FREE", 0))
+                    )
+                    > 0
+                    else 0.0,
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #56: 65. Foreign-key dependency graph
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_foreign_keys()
+Headers     : Database, Child Table, Child Column, Ref Database, Parent Table, Parent Column
+Description : Referential dependency graph for migration sequencing.
+
+SQL Query / Implementation:
+```python
+def get_foreign_keys(self) -> List[Dict[str, Any]]:
+        query = """
+SELECT 
+    constraint_schema, 
+    table_name, 
+    constraint_name, 
+    column_name, 
+    referenced_table_schema, 
+    referenced_table_name, 
+    referenced_column_name, 
+    ordinal_position 
+FROM information_schema.key_column_usage 
+WHERE referenced_table_name IS NOT NULL 
+  AND constraint_schema NOT IN ('information_schema','mysql','performance_schema','sys') 
+ORDER BY 
+    constraint_schema, 
+    table_name, 
+    constraint_name, 
+    ordinal_position;
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row.get("constraint_schema")
+                    or row.get("CONSTRAINT_SCHEMA"),
+                    "table_name": row.get("table_name") or row.get("TABLE_NAME"),
+                    "constraint_name": row.get("constraint_name")
+                    or row.get("CONSTRAINT_NAME"),
+                    "column_name": row.get("column_name") or row.get("COLUMN_NAME"),
+                    "ref_schema": row.get("referenced_table_schema")
+                    or row.get("REFERENCED_TABLE_SCHEMA"),
+                    "ref_table": row.get("referenced_table_name")
+                    or row.get("REFERENCED_TABLE_NAME"),
+                    "ref_column": row.get("referenced_column_name")
+                    or row.get("REFERENCED_COLUMN_NAME"),
+                    "ordinal_position": (
+                        row.get("ordinal_position")
+                        if row.get("ordinal_position") is not None
+                        else row.get("ORDINAL_POSITION")
+                    ),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #57: 66. Stored code dependencies
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_stored_procedures()
+Headers     : Programmability Object, Total Count
+Description : Stored procedures, triggers, events, and views dependency inventory.
+
+SQL Query / Implementation:
+```python
+def get_stored_procedures(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT
+                ROUTINE_SCHEMA AS schema_name,
+                ROUTINE_NAME AS routine_name,
+                ROUTINE_TYPE AS routine_type,
+                DATA_TYPE AS return_type,
+                CREATED AS created_time,
+                LAST_ALTERED AS last_altered
+            FROM INFORMATION_SCHEMA.ROUTINES
+            WHERE {self._system_table_filter('ROUTINE_SCHEMA')}
+            ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "schema_name": row["schema_name"],
+                    "routine_name": row["routine_name"],
+                    "routine_type": row["routine_type"],
+                    "return_type": row["return_type"] or "-",
+                    "created_time": row["created_time"],
+                    "last_altered": row["last_altered"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #58: MySQL Key System Configuration Variables
+--------------------------------------------------------------------------------
+Method Name : MySQLConnector.get_server_variables()
+Headers     : Variable Name, Setting Value
+Description : Engine, memory, connection, and binlog configuration parameters.
+
+SQL Query / Implementation:
+```python
+def get_server_variables(self) -> List[Dict[str, Any]]:
+        target_vars = (
+            "'innodb_buffer_pool_size', 'max_connections', 'sql_mode', "
+            "'character_set_server', 'collation_server', 'innodb_file_per_table', "
+            "'log_bin', 'binlog_format', 'gtid_mode', 'version'"
+        )
+        query = f"""
+            SELECT VARIABLE_NAME AS var_name, VARIABLE_VALUE AS var_value
+            FROM INFORMATION_SCHEMA.GLOBAL_VARIABLES
+            WHERE VARIABLE_NAME IN ({target_vars})
+            ORDER BY VARIABLE_NAME
+        """
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [
+                {
+                    "var_name": row["var_name"],
+                    "var_value": row["var_value"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute(
+                    "SHOW VARIABLES WHERE Variable_name IN ('innodb_buffer_pool_size', 'max_connections', 'sql_mode', 'character_set_server', 'collation_server', 'innodb_file_per_table', 'log_bin', 'binlog_format', 'gtid_mode', 'version')"
+                )
+                rows = cursor.fetchall()
+                cursor.close()
+                return [
+                    {
+                        "var_name": row[0],
+                        "var_value": row[1],
+                    }
+                    for row in rows
+                ]
+            except Exception:
+                return []
+```
+

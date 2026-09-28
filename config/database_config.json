@@ -1,0 +1,31 @@
+{
+  "PostgreSQL": {
+    "host": "",
+    "port": "",
+    "username": "",
+    "password": "",
+    "database": ""
+  },
+  "SQL Server": {
+    "host": "",
+    "port": "1433",
+    "username": "",
+    "password": "",
+    "database": "",
+    "schema": "dbo"
+  },
+  "Oracle": {
+    "host": "CHANGE_ME",
+    "port": "CHANGE_ME",
+    "username": "CHANGE_ME",
+    "password": "CHANGE_ME",
+    "service_name": "CHANGE_ME",
+    "schema": "CHANGE_ME"
+  },
+  "MySQL": {
+    "host": "",
+    "port": "",
+    "username": "",
+    "password": ""
+  }
+}

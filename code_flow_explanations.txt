@@ -1,0 +1,214 @@
+================================================================================
+           DATABASE METADATA EXPLORER - SYSTEM & CODE FLOW GUIDE
+================================================================================
+
+1. SYSTEM ARCHITECTURE & OVERVIEW
+--------------------------------------------------------------------------------
+The Database Metadata Explorer is a modern web-based observability and data quality
+analytics platform supporting PostgreSQL, MySQL, SQL Server, and Oracle.
+
+The system consists of two primary operational modules:
+  1. Database Insights : Real-time performance KPIs, health assessment, 8 visual charts,
+                         and deep metadata suite analysis.
+  2. Data Insights     : In-memory exploratory data analysis (EDA), semantic column profiling,
+                         structural inconsistency detection, duplicate tracking, and missing value
+                         imputation recommendations.
+
+Architecture Layers:
+  - Frontend SPA      : `static/index.html` (Tabbed navigation, Chart.js, Lucide icons, Tailwind CSS).
+  - Web Server API    : `app.py` (FastAPI REST service, KPI extraction, status evaluator).
+  - Metadata Engine   : `database_metadata_explorer.py` & `database_connectors/` (PostgreSQL, MySQL, SQL Server, Oracle).
+  - Profiling Engine  : `datainsights/EDA/` (In-memory Pandas profiling, quality analyzers, imputation).
+  - Service Layer     : `data_insights_service.py` (Wrapper for Data Insights API endpoints).
+  - Export Engine     : `pdf_generator.py` (ReportLab document generator for Database & Data Insights PDF reports).
+
+
+2. CORE COMPONENT DIRECTORY
+--------------------------------------------------------------------------------
+File / Directory                   | Role & Primary Responsibilities
+--------------------------------------------------------------------------------
+app.py                             | FastAPI web application hosting REST APIs:
+                                   | - Endpoints: `/api/connect`, `/api/insights`, `/api/export-pdf`,
+                                   |   `/api/data-insights/*`.
+                                   | - Logic: Extracts KPI & chart metrics (`_extract_charts_summary`),
+                                   |   evaluates status (`_evaluate_status`), generates health summary.
+
+database_metadata_explorer.py      | Orchestrates database metadata suite execution across all connectors.
+                                   | Normalizes raw SQL query outputs into standard table dictionaries.
+
+database_connectors/               | Engine connectors executing native SQL metadata queries:
+  - postgres.py                    | - PostgreSQL (pg_stat_statements, pg_stat_activity, pg_class).
+  - mysql.py                       | - MySQL (information_schema, performance_schema, sys).
+  - sqlserver.py                   | - SQL Server (sys.dm_exec_query_stats, sys.dm_os_wait_stats).
+  - oracle.py                      | - Oracle (DBA_SEGMENTS, DBA_USERS, DBA_CONSTRAINTS, V$SESSION).
+
+datainsights/EDA/                  | Native Pandas/NumPy in-memory profiling suite (< 0.1s execution):
+  - connectors.py                  | - Database query execution with pushdown limit (`LIMIT`, `TOP`, `ROWNUM`).
+  - semantics.py                   | - `MissingValueNormalizer` & `ColumnTypeDetector` (semantic type inference).
+  - quality.py                     | - `DataInconsistencyAnalyzer` & `DuplicateRecordAnalyzer`.
+  - profiling.py                   | - `DatasetProfiler` (descriptive statistics & categorical distributions).
+  - imputation.py                  | - `ImputationRecommender` (rule-based missing value strategies).
+
+data_insights_service.py           | Bridge service connecting REST API to EDA profiling pipeline.
+
+pdf_generator.py                   | ReportLab PDF engine generating standard ReportLab documents with:
+                                   | - Navy Blue headers (`#1E3A8A`), Calibri/Helvetica typography.
+                                   | - Dynamic `NumberedCanvas` ("Page X of Y"), auto text wrapping via `Paragraph`.
+                                   | - Numbered sections (1. Source Info, 2. Summary, ..., 9. Column Profiles).
+
+static/index.html                  | Single Page Application rendering tabbed UI, 6 KPI cards, Chart.js graphs,
+                                   | metadata table accordions, and PDF export controls.
+
+
+3. STEP-BY-STEP EXECUTION TRACE (WHAT HAPPENS WHEN YOU RUN `python app.py`)
+--------------------------------------------------------------------------------
+
+[STEP 1: LAUNCHING SERVER (`python app.py`)]
+  - Command      : `python app.py`
+  - Entry File   : `app.py`
+  - Execution    : Python runs the main block at the bottom of `app.py`:
+                   `uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)`
+  - Output       : Starts Uvicorn server listening for HTTP requests on `http://localhost:8000`.
+
+[STEP 2: OPENING WEB DASHBOARD (`http://localhost:8000`)]
+  - User Action  : Opens `http://localhost:8000` in browser.
+  - API Route    : `GET /`
+  - Method       : `read_root()` in `app.py`
+  - Execution    : Serves `static/index.html` (the Single Page Application UI).
+  - Browser Runs :
+      1. Loads UI layout, Chart.js, Lucide icons, and CSS styles.
+      2. Calls `GET /api/databases` -> `get_databases()` in `app.py` (returns list of MySQL, PostgreSQL, SQL Server, Oracle).
+      3. Calls `GET /api/saved-config` -> `get_saved_config()` in `app.py` -> invokes `explorer.load_database_config()` in `database_metadata_explorer.py` (reads `config/database_config.json` to pre-fill saved hosts/usernames).
+
+[STEP 3: CONNECTING TO DATABASE]
+  - User Action  : Chooses a database, fills credentials (host, port, username, password), and clicks "Connect".
+  - API Route    : `POST /api/connect`
+  - Method       : `connect_database()` in `app.py`
+  - Execution    :
+      1. Calls `_create_and_connect_explorer(database_type, credentials)` in `app.py`.
+      2. Instantiates `DatabaseMetadataExplorer` from `database_metadata_explorer.py`.
+      3. Instantiates specific connector based on DB type:
+         - MySQL      -> `MySQLConnector` in `database_connectors/mysql.py`
+         - PostgreSQL -> `PostgreSQLConnector` in `database_connectors/postgres.py`
+         - SQL Server -> `SQLServerConnector` in `database_connectors/sqlserver.py`
+         - Oracle     -> `OracleConnector` in `database_connectors/oracle.py`
+      4. Executes `connector.connect()`, which opens DB connection via driver (`mysql.connector`, `psycopg2`, `pyodbc`, `oracledb`).
+      5. Returns success status `{"status": "connected"}` to browser.
+
+[STEP 4: FETCHING DATABASE INSIGHTS & DASHBOARD KPIs]
+  - User Action  : Automatic call after connection success.
+  - API Route    : `POST /api/insights`
+  - Method       : `get_insights()` in `app.py`
+  - Execution    :
+      1. Re-establishes DB connection via `_create_and_connect_explorer()`.
+      2. Gets query fetcher functions from `explorer._get_<db>_fetchers()` in `database_metadata_explorer.py`.
+      3. Loops through fetchers, calling SQL query methods on connector (e.g. `connector.get_top_100_largest_tables()`, `connector.get_wait_events()`).
+      4. Normalizes raw SQL dicts via `explorer._normalize_rows()` in `database_metadata_explorer.py` (formats numbers & KB/MB/GB strings).
+      5. Calls `_extract_charts_summary(reports)` in `app.py`:
+         - Extracts 6 KPI metrics (CPU %, IOPS, Active Connections, QPS, Storage Size, Blocked Sessions) using `_evaluate_status()`.
+         - Builds 8 Chart.js data models (CPU trend, IO trend, Top CPU queries, Top IO queries, Wait stats, Cache hit gauge, Storage pie, Top 10 largest tables).
+         - Calls `_generate_health_summary()` to score overall status & findings.
+      6. Returns JSON payload to browser.
+  - Browser Runs : `renderDashboard(data)` and `renderAllCharts(charts)` in `static/index.html` to update KPI cards, draw Chart.js graphs, and show report accordions.
+
+[STEP 5: PROFILING DATA INSIGHTS (EDA TAB)]
+  - User Action  : Switches to `[ Data Insights ]` tab, selects a Database/Schema/Table, and clicks **Analyze Data**.
+  - API Routes   :
+      - `GET /api/data-insights/databases` -> `data_insights_service.get_databases()`
+      - `GET /api/data-insights/schemas`   -> `data_insights_service.get_schemas()`
+      - `GET /api/data-insights/tables`    -> `data_insights_service.get_tables()`
+      - `POST /api/data-insights/profile`  -> `profile_table()` in `app.py`
+  - Execution    :
+      1. `app.py` calls `data_insights_service.profile_table()` in `data_insights_service.py`.
+      2. Connector in `datainsights/EDA/connectors.py` executes pushdown SQL (`SELECT * FROM <table> LIMIT <N>`) into a Pandas DataFrame.
+      3. Profiling pipeline runs in `datainsights/EDA/`:
+         - `DataInconsistencyAnalyzer.analyze()` in `quality.py` (checks format issues).
+         - `MissingValueNormalizer.normalize()` in `semantics.py` (standardizes null tokens).
+         - `ColumnTypeDetector.infer()` in `semantics.py` (infers semantic types).
+         - `DuplicateRecordAnalyzer.analyze()` in `quality.py` (counts duplicate rows).
+         - `DatasetProfiler.profile()` in `profiling.py` (calculates mean, median, stddev, min, max).
+         - `ImputationRecommender.add_recommendations()` in `imputation.py` (proposes median/mode imputations).
+      4. Returns JSON payload to browser.
+  - Browser Runs : `renderDataInsightsResults(data)` and `renderDiCharts(charts)` in `static/index.html` to display 4 KPI cards, 6 charts, quality findings, and profiling tables.
+
+[STEP 6: EXPORTING PDF REPORT]
+  - User Action  : Clicks top header button "Export PDF Report" or "Export Data Insights PDF".
+  - API Route    : `POST /api/export-pdf` OR `POST /api/data-insights/export-pdf`
+  - Method       : `export_pdf()` OR `export_data_insights_pdf()` in `app.py`
+  - Execution    :
+      1. Calls `PDFReportGenerator.generate_report()` or `generate_data_insights_report()` in `pdf_generator.py`.
+      2. ReportLab engine builds formatted PDF with Navy Blue headers, alternating row colors, paragraph text wrapping, and page numbering.
+      3. Returns binary PDF stream back to browser for automatic download.
+
+
+4. DATABASE INSIGHTS END-TO-END FLOW
+--------------------------------------------------------------------------------
+1. Engine & Credentials Selection:
+   - Frontend loads supported databases from `GET /api/databases`.
+   - Saved credentials can be pre-filled from `config/database_config.json` via `GET /api/saved-config`.
+   - User submits credentials -> `POST /api/connect` validates database connection health.
+
+2. Fetching & Normalization:
+   - Frontend calls `POST /api/insights` with credentials.
+   - Connector executes SQL queries across metadata views (tables, performance statistics, locks, waits).
+   - Explorer normalizes results into standard header/row datasets.
+
+3. KPI Extraction & Health Scoring:
+   - `app.py` parses report datasets to extract 6 operational KPIs:
+       1. CPU Utilization (%)
+       2. I/O Operations (IOPS)
+       3. Active Connections
+       4. Queries per Second (QPS)
+       5. Database Storage (MB/GB)
+       6. Blocked Sessions
+   - `app.py` generates 8 Chart.js data models (CPU trend, IO trend, Top CPU queries, Top IO queries,
+     Top wait events, Cache hit gauge, Storage breakdown, Top 10 largest tables).
+   - `_generate_health_summary()` computes overall health status (Healthy, Normal, Elevated, High, Critical)
+     and top data-driven findings.
+
+4. UI Rendering:
+   - Frontend displays Health Banner, 6 KPI Cards, 8 visual Chart.js graphs, and search-filterable metadata accordions.
+
+
+5. DATA INSIGHTS (EDA PROFILING) END-TO-END FLOW
+--------------------------------------------------------------------------------
+1. Table Selection:
+   - User switches to `[ Data Insights ]` tab.
+   - Frontend populates Database, Schema, and Table dropdown selectors via `/api/data-insights/*`.
+   - User selects target table and Sample Limit (`Top 100 Rows` to `All Rows`).
+
+2. In-Memory Profiling Pipeline:
+   - User clicks **Analyze Data** -> `POST /api/data-insights/profile`.
+   - Connector executes pushdown query (`SELECT * FROM table LIMIT/TOP N`).
+   - EDA pipeline processes dataframe in-memory (< 0.1s):
+       a. `MissingValueNormalizer`: Converts null-like strings (`"N/A"`, `"null"`) to actual `None`.
+       b. `ColumnTypeDetector`: Infers semantic types (`IDENTIFIER`, `TIMESTAMP`, `NUMERICAL`, `CATEGORICAL`, etc.).
+       c. `DataInconsistencyAnalyzer`: Detects mixed data types, trailing spaces, and format issues.
+       d. `DuplicateRecordAnalyzer`: Counts exact row duplicates and group sizes.
+       e. `DatasetProfiler`: Computes descriptive stats (`mean`, `median`, `stddev`, `min`, `max`, `q1`, `q3`, `iqr`).
+       f. `ImputationRecommender`: Proposes column imputation techniques (Median, Mode, Constant).
+
+3. UI Rendering:
+   - Displays 4 Summary KPIs (Rows, Cols, Missing Cells %, Duplicates %).
+   - Displays 6 Chart.js graphs (Missing by Col, Data Quality, Duplicates, Semantic Types, Numeric Means, Categorical Top Values).
+   - Renders structural inconsistency cards, column profiling tables, and imputation recommendations.
+
+
+6. PDF REPORT GENERATION FLOW
+--------------------------------------------------------------------------------
+1. Export Action:
+   - User clicks top header PDF export button (`Export PDF Report` or `Export Data Insights PDF`).
+
+2. Backend Report Building:
+   - Frontend calls `POST /api/export-pdf` or `POST /api/data-insights/export-pdf`.
+   - `pdf_generator.py` formats data into ReportLab `Flowable` elements.
+   - Styling parameters:
+       - Header Bar   : Navy Blue background (`#1E3A8A`) with white bold text.
+       - Grid & Rows  : Alternating `#FFFFFF` / `#F9FAFB` row backgrounds, `#E5E7EB` grid lines.
+       - Text Wrapping: All table cells wrapped in `Paragraph` objects to prevent overflow.
+       - Page Numbers : `NumberedCanvas` computes total pages dynamically ("Page X of Y").
+       - Section Layout: Data Insights PDF includes explicit numbered sections (1 to 9) matching table layout style.
+
+3. File Delivery:
+   - Binary PDF stream returned directly to client browser for instant download.
+================================================================================

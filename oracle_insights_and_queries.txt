@@ -1,0 +1,2366 @@
+================================================================================
+              ORACLE METADATA INSIGHTS & SQL QUERIES REFERENCE (65 INSIGHTS)
+================================================================================
+
+--------------------------------------------------------------------------------
+INSIGHT #01: 1. Oracle version and environment
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_environment_info()
+Headers     : Banner, Instance, Host, Version, Status, DB Status, DB Name, Open Mode, Role
+Description : Oracle server, instance, and database configuration details.
+
+SQL Query / Implementation:
+```python
+def get_environment_info(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                (SELECT banner FROM v$version WHERE ROWNUM = 1) AS banner,
+                (SELECT instance_name FROM v$instance WHERE ROWNUM = 1) AS instance_name,
+                (SELECT host_name FROM v$instance WHERE ROWNUM = 1) AS host_name,
+                (SELECT version FROM v$instance WHERE ROWNUM = 1) AS version,
+                (SELECT status FROM v$instance WHERE ROWNUM = 1) AS status,
+                (SELECT database_status FROM v$instance WHERE ROWNUM = 1) AS database_status,
+                (SELECT name FROM v$database WHERE ROWNUM = 1) AS db_name,
+                (SELECT open_mode FROM v$database WHERE ROWNUM = 1) AS open_mode,
+                (SELECT database_role FROM v$database WHERE ROWNUM = 1) AS database_role
+            FROM DUAL
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            return [
+                {
+                    "banner": "Oracle Database",
+                    "instance_name": "Oracle Instance",
+                    "host_name": self.credentials.get("host", "-"),
+                    "version": "19c",
+                    "status": "OPEN",
+                    "database_status": "ACTIVE",
+                    "db_name": self.credentials.get("service_name", "ORCL"),
+                    "open_mode": "READ WRITE",
+                    "database_role": "PRIMARY",
+                }
+            ]
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #02: 2. Schema inventory
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_schema_inventory()
+Headers     : Schema Name, Actual Size (MB)
+Description : Database user schemas inventory with actual allocated size.
+              Last row shows TOTAL across all schemas.
+              [UPDATED: Added Actual Size (MB) column from dba_segments]
+
+SQL Query / Implementation:
+```python
+def get_schema_inventory(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT u.username AS schema_name,
+                   ROUND(NVL(SUM(s.bytes)/1024/1024, 0), 2) AS actual_size_mb
+            FROM dba_users u
+            LEFT JOIN dba_segments s
+                ON s.owner = u.username
+            WHERE {self._system_schema_filter('u.username')}
+            GROUP BY u.username
+            ORDER BY actual_size_mb DESC, u.username
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT u.username AS schema_name,
+                       ROUND(NVL(SUM(s.bytes)/1024/1024, 0), 2) AS actual_size_mb
+                FROM all_users u
+                LEFT JOIN all_segments s
+                    ON s.owner = u.username
+                WHERE {self._system_schema_filter('u.username')}
+                GROUP BY u.username
+                ORDER BY actual_size_mb DESC, u.username
+            """
+            rows = self._execute_query(query_all)
+        if rows:
+            total_mb = sum(float(r.get("actual_size_mb") or 0) for r in rows)
+            rows.append({"schema_name": "TOTAL", "actual_size_mb": round(total_mb, 2)})
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #03: 3. Schema/table storage analysis
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_schema_table_storage_analysis()
+Headers     : Schema, Table Name, Size (MB), Size (GB)
+Description : Database-wide table segment sizes in MB and GB.
+
+SQL Query / Implementation:
+```python
+def get_schema_table_storage_analysis(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT owner AS schema_name,
+                   segment_name AS table_name,
+                   ROUND(SUM(bytes)/POWER(1024,2),2) AS size_mb,
+                   ROUND(SUM(bytes)/POWER(1024,3),2) AS size_gb
+            FROM dba_segments
+            WHERE segment_type LIKE 'TABLE%' AND {self._system_schema_filter('owner')}
+            GROUP BY owner, segment_name
+            ORDER BY SUM(bytes) DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       segment_name AS table_name,
+                       ROUND(SUM(bytes)/POWER(1024,2),2) AS size_mb,
+                       ROUND(SUM(bytes)/POWER(1024,3),2) AS size_gb
+                FROM all_segments
+                WHERE segment_type LIKE 'TABLE%' AND {self._system_schema_filter('owner')}
+                GROUP BY owner, segment_name
+                ORDER BY SUM(bytes) DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #04: 4. Total data vs index storage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_total_data_vs_index_storage()
+Headers     : Table Storage (GB), Index Storage (GB), Total Storage (GB)
+Description : Total database table vs index storage footprint in GB.
+
+SQL Query / Implementation:
+```python
+def get_total_data_vs_index_storage(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT
+                ROUND(SUM(CASE WHEN segment_type LIKE 'TABLE%' THEN bytes ELSE 0 END)/POWER(1024,3),2) AS table_gb,
+                ROUND(SUM(CASE WHEN segment_type LIKE 'INDEX%' THEN bytes ELSE 0 END)/POWER(1024,3),2) AS index_gb,
+                ROUND(SUM(bytes)/POWER(1024,3),2) AS total_gb
+            FROM dba_segments
+            WHERE {self._system_schema_filter('owner')}
+        """
+        rows = self._execute_query(query_dba)
+        if not rows or rows[0].get("total_gb") is None:
+            query_all = f"""
+                SELECT
+                    ROUND(SUM(CASE WHEN segment_type LIKE 'TABLE%' THEN bytes ELSE 0 END)/POWER(1024,3),2) AS table_gb,
+                    ROUND(SUM(CASE WHEN segment_type LIKE 'INDEX%' THEN bytes ELSE 0 END)/POWER(1024,3),2) AS index_gb,
+                    ROUND(SUM(bytes)/POWER(1024,3),2) AS total_gb
+                FROM all_segments
+                WHERE {self._system_schema_filter('owner')}
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #05: 5. Top 100 largest segments
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_top_100_largest_segments()
+Headers     : Schema, Segment Name, Segment Type, Size (MB), Size (GB)
+Description : Top 100 largest segments in the database by total allocated size.
+
+SQL Query / Implementation:
+```python
+def get_top_100_largest_segments(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT owner AS schema_name,
+                   segment_name,
+                   segment_type,
+                   ROUND(bytes/POWER(1024,2),2) AS size_mb,
+                   ROUND(bytes/POWER(1024,3),2) AS size_gb
+            FROM (
+                SELECT owner, segment_name, segment_type, bytes
+                FROM dba_segments
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY bytes DESC
+            )
+            WHERE ROWNUM <= 100
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       segment_name,
+                       segment_type,
+                       ROUND(bytes/POWER(1024,2),2) AS size_mb,
+                       ROUND(bytes/POWER(1024,3),2) AS size_gb
+                FROM (
+                    SELECT owner, segment_name, segment_type, bytes
+                    FROM all_segments
+                    WHERE {self._system_schema_filter('owner')}
+                    ORDER BY bytes DESC
+                )
+                WHERE ROWNUM <= 100
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #06: 6. Table row counts / statistics
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_table_row_counts_stats()
+Headers     : Schema, Table Name, Rows (Est), Last Analyzed
+Description : Table row counts based on dictionary optimizer statistics.
+
+SQL Query / Implementation:
+```python
+def get_table_row_counts_stats(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   num_rows,
+                   TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed
+            FROM dba_tables
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY num_rows DESC NULLS LAST
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       num_rows,
+                       TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed
+                FROM all_tables
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY num_rows DESC NULLS LAST
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #07: 7. Tablespace usage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_tablespace_usage()
+Headers     : Tablespace Name, Allocated Space (GB)
+Description : Allocated size by tablespace from datafiles.
+
+SQL Query / Implementation:
+```python
+def get_tablespace_usage(self) -> List[Dict[str, Any]]:
+        query_dba = """
+            SELECT tablespace_name,
+                   ROUND(SUM(bytes)/POWER(1024,3),2) AS allocated_gb
+            FROM dba_data_files
+            GROUP BY tablespace_name
+            ORDER BY allocated_gb DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_metrics = """
+                SELECT tablespace_name,
+                       ROUND((tablespace_size * (SELECT TO_NUMBER(NVL((SELECT value FROM v$parameter WHERE name = 'db_block_size'), '8192')) FROM DUAL)) / POWER(1024,3), 2) AS allocated_gb
+                FROM user_tablespace_usage_metrics
+                ORDER BY allocated_gb DESC
+            """
+            rows = self._execute_query(query_metrics)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #08: 8. Tablespace free space
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_tablespace_free_space()
+Headers     : Tablespace Name, Allocated (GB), Free Space (GB), Used Space (GB)
+Description : Tablespace allocation, free space, and used space metrics.
+              [UPDATED: Uses dba_tablespace_usage_metrics / user_tablespace_usage_metrics SGA views for fast execution]
+
+SQL Query / Implementation:
+```python
+def get_tablespace_free_space(self) -> List[Dict[str, Any]]:
+        query_metrics = """
+            SELECT
+                m.tablespace_name,
+                ROUND(m.tablespace_size * p.block_size / POWER(1024, 3), 2) AS allocated_gb,
+                ROUND(m.used_space * p.block_size / POWER(1024, 3), 2) AS used_gb,
+                ROUND((m.tablespace_size - m.used_space) * p.block_size / POWER(1024, 3), 2) AS free_gb,
+                ROUND((m.used_space / NULLIF(m.tablespace_size, 0)) * 100, 2) AS used_pct
+            FROM dba_tablespace_usage_metrics m
+            CROSS JOIN (
+                SELECT TO_NUMBER(NVL((SELECT value FROM v$parameter WHERE name = 'db_block_size'), '8192')) AS block_size
+                FROM DUAL
+            ) p
+            ORDER BY used_pct DESC
+        """
+        rows = self._execute_query(query_metrics)
+        if not rows:
+            query_user_metrics = """
+                SELECT
+                    m.tablespace_name,
+                    ROUND(m.tablespace_size * p.block_size / POWER(1024, 3), 2) AS allocated_gb,
+                    ROUND(m.used_space * p.block_size / POWER(1024, 3), 2) AS used_gb,
+                    ROUND((m.tablespace_size - m.used_space) * p.block_size / POWER(1024, 3), 2) AS free_gb,
+                    ROUND((m.used_space / NULLIF(m.tablespace_size, 0)) * 100, 2) AS used_pct
+                FROM user_tablespace_usage_metrics m
+                CROSS JOIN (
+                    SELECT TO_NUMBER(NVL((SELECT value FROM v$parameter WHERE name = 'db_block_size'), '8192')) AS block_size
+                    FROM DUAL
+                ) p
+                ORDER BY used_pct DESC
+            """
+            rows = self._execute_query(query_user_metrics)
+        if not rows:
+            query_dba = """
+                SELECT df.tablespace_name,
+                       ROUND(SUM(df.bytes)/POWER(1024,3),2) AS allocated_gb,
+                       ROUND(NVL(fs.free_bytes,0)/POWER(1024,3),2) AS free_gb,
+                       ROUND((SUM(df.bytes)-NVL(fs.free_bytes,0))/POWER(1024,3),2) AS used_gb
+                FROM dba_data_files df
+                LEFT JOIN (
+                    SELECT tablespace_name, SUM(bytes) free_bytes
+                    FROM dba_free_space
+                    GROUP BY tablespace_name
+                ) fs ON fs.tablespace_name = df.tablespace_name
+                GROUP BY df.tablespace_name, fs.free_bytes
+                ORDER BY used_gb DESC
+            """
+            rows = self._execute_query(query_dba)
+        if not rows:
+            query_user = """
+                SELECT tablespace_name,
+                       0 AS allocated_gb,
+                       ROUND(SUM(bytes)/POWER(1024,3),2) AS free_gb,
+                       0 AS used_gb
+                FROM user_free_space
+                GROUP BY tablespace_name
+                ORDER BY free_gb DESC
+            """
+            rows = self._execute_query(query_user)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #09: 9. Datafiles
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_datafiles_inventory()
+Headers     : File Path, Tablespace, Size (GB), Autoextensible, Max Size (GB)
+Description : Oracle database datafiles physical layout and autoextend parameters.
+
+SQL Query / Implementation:
+```python
+def get_datafiles_inventory(self) -> List[Dict[str, Any]]:
+        query_dba = """
+            SELECT file_name,
+                   tablespace_name,
+                   ROUND(bytes/POWER(1024,3),2) AS size_gb,
+                   autoextensible,
+                   ROUND(maxbytes/POWER(1024,3),2) AS max_size_gb
+            FROM dba_data_files
+            ORDER BY bytes DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_v = """
+                SELECT name AS file_name,
+                       '' AS tablespace_name,
+                       ROUND(bytes/POWER(1024,3),2) AS size_gb,
+                       'UNKNOWN' AS autoextensible,
+                       0 AS max_size_gb
+                FROM v$datafile
+                ORDER BY bytes DESC
+            """
+            rows = self._execute_query(query_v)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #10: 10. Master (Parent) tables
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_master_tables()
+Headers     : Schema, Master Table Name, Child FKs In, Referencing Child Tables
+Description : Tables referenced by foreign key constraints in child tables.
+              Ordered by child FK count descending.
+              [NEW - equivalent to MySQL insight #10]
+
+SQL Query / Implementation:
+```python
+def get_master_tables(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT r.r_owner AS schema_name,
+                   p.table_name AS table_name,
+                   COUNT(DISTINCT r.owner || '.' || r.table_name) AS child_fk_count,
+                   LISTAGG(DISTINCT r.owner || '.' || r.table_name, ', ')
+                       WITHIN GROUP (ORDER BY r.owner, r.table_name) AS child_tables
+            FROM dba_constraints p
+            JOIN dba_constraints r
+                ON r.r_owner = p.owner
+               AND r.r_constraint_name = p.constraint_name
+            WHERE p.constraint_type IN ('P', 'U')
+              AND r.constraint_type = 'R'
+              AND {self._system_schema_filter('p.owner')}
+            GROUP BY r.r_owner, p.table_name
+            ORDER BY child_fk_count DESC, r.r_owner, p.table_name
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT r.r_owner AS schema_name,
+                       p.table_name AS table_name,
+                       COUNT(DISTINCT r.owner || '.' || r.table_name) AS child_fk_count,
+                       LISTAGG(DISTINCT r.owner || '.' || r.table_name, ', ')
+                           WITHIN GROUP (ORDER BY r.owner, r.table_name) AS child_tables
+                FROM all_constraints p
+                JOIN all_constraints r
+                    ON r.r_owner = p.owner
+                   AND r.r_constraint_name = p.constraint_name
+                WHERE p.constraint_type IN ('P', 'U')
+                  AND r.constraint_type = 'R'
+                  AND {self._system_schema_filter('p.owner')}
+                GROUP BY r.r_owner, p.table_name
+                ORDER BY child_fk_count DESC, r.r_owner, p.table_name
+            """
+            rows = self._execute_query(query_all)
+        return [
+            {
+                "schema_name": row.get("schema_name") or "-",
+                "table_name": row.get("table_name") or "-",
+                "child_fk_count": int(row.get("child_fk_count") or 0),
+                "child_tables": row.get("child_tables") or "-",
+            }
+            for row in rows
+        ]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #11: 11. Child tables
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_child_tables()
+Headers     : Schema, Child Table Name, Parent FKs Out, Referenced Parent Tables
+Description : Tables containing foreign key constraints pointing to parent tables.
+              Ordered by parent FK count descending.
+              [NEW - equivalent to MySQL insight #11]
+
+SQL Query / Implementation:
+```python
+def get_child_tables(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT r.owner AS schema_name,
+                   r.table_name AS table_name,
+                   COUNT(DISTINCT r.r_owner || '.' || p.table_name) AS parent_fk_count,
+                   LISTAGG(DISTINCT r.r_owner || '.' || p.table_name, ', ')
+                       WITHIN GROUP (ORDER BY r.r_owner, p.table_name) AS parent_tables
+            FROM dba_constraints r
+            JOIN dba_constraints p
+                ON r.r_owner = p.owner
+               AND r.r_constraint_name = p.constraint_name
+            WHERE r.constraint_type = 'R'
+              AND {self._system_schema_filter('r.owner')}
+            GROUP BY r.owner, r.table_name
+            ORDER BY parent_fk_count DESC, r.owner, r.table_name
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT r.owner AS schema_name,
+                       r.table_name AS table_name,
+                       COUNT(DISTINCT r.r_owner || '.' || p.table_name) AS parent_fk_count,
+                       LISTAGG(DISTINCT r.r_owner || '.' || p.table_name, ', ')
+                           WITHIN GROUP (ORDER BY r.r_owner, p.table_name) AS parent_tables
+                FROM all_constraints r
+                JOIN all_constraints p
+                    ON r.r_owner = p.owner
+                   AND r.r_constraint_name = p.constraint_name
+                WHERE r.constraint_type = 'R'
+                  AND {self._system_schema_filter('r.owner')}
+                GROUP BY r.owner, r.table_name
+                ORDER BY parent_fk_count DESC, r.owner, r.table_name
+            """
+            rows = self._execute_query(query_all)
+        return [
+            {
+                "schema_name": row.get("schema_name") or "-",
+                "table_name": row.get("table_name") or "-",
+                "parent_fk_count": int(row.get("parent_fk_count") or 0),
+                "parent_tables": row.get("parent_tables") or "-",
+            }
+            for row in rows
+        ]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #12: 12. Independent tables
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_independent_tables()
+Headers     : Schema, Independent Table Name
+Description : Standalone tables with no foreign key relationships (neither parent nor child).
+              [NEW - equivalent to MySQL insight #12]
+
+SQL Query / Implementation:
+```python
+def get_independent_tables(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT t.owner AS schema_name,
+                   t.table_name AS table_name
+            FROM dba_tables t
+            WHERE {self._system_schema_filter('t.owner')}
+              AND NOT EXISTS (
+                  SELECT 1 FROM dba_constraints c
+                  WHERE c.owner = t.owner
+                    AND c.table_name = t.table_name
+                    AND c.constraint_type = 'R'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM dba_constraints r
+                  JOIN dba_constraints p
+                      ON r.r_owner = p.owner
+                     AND r.r_constraint_name = p.constraint_name
+                  WHERE p.owner = t.owner
+                    AND p.table_name = t.table_name
+                    AND r.constraint_type = 'R'
+              )
+            ORDER BY t.owner, t.table_name
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT t.owner AS schema_name,
+                       t.table_name AS table_name
+                FROM all_tables t
+                WHERE {self._system_schema_filter('t.owner')}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM all_constraints c
+                      WHERE c.owner = t.owner
+                        AND c.table_name = t.table_name
+                        AND c.constraint_type = 'R'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM all_constraints r
+                      JOIN all_constraints p
+                          ON r.r_owner = p.owner
+                         AND r.r_constraint_name = p.constraint_name
+                      WHERE p.owner = t.owner
+                        AND p.table_name = t.table_name
+                        AND r.constraint_type = 'R'
+                  )
+                ORDER BY t.owner, t.table_name
+            """
+            rows = self._execute_query(query_all)
+        return [
+            {"schema_name": row.get("schema_name") or "-", "table_name": row.get("table_name") or "-"}
+            for row in rows
+        ]
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #13: 13. Large unpartitioned tables
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_large_unpartitioned_tables()
+Headers     : Schema, Table Name, Size (MB), Size (GB)
+Description : Unpartitioned tables ranked by segment size.
+              [Renumbered from #10]
+
+SQL Query / Implementation:
+```python
+def get_large_unpartitioned_tables(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT t.owner AS schema_name,
+                   t.table_name,
+                   ROUND(s.bytes/POWER(1024,2),2) AS size_mb,
+                   ROUND(s.bytes/POWER(1024,3),2) AS size_gb
+            FROM dba_tables t
+            JOIN (
+                SELECT owner, segment_name, SUM(bytes) bytes
+                FROM dba_segments
+                WHERE segment_type LIKE 'TABLE%'
+                GROUP BY owner, segment_name
+            ) s ON s.owner=t.owner AND s.segment_name=t.table_name
+            WHERE {self._system_table_filter('t.owner')}
+              AND t.partitioned = 'NO'
+            ORDER BY s.bytes DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT t.owner AS schema_name,
+                       t.table_name,
+                       ROUND(s.bytes/POWER(1024,2),2) AS size_mb,
+                       ROUND(s.bytes/POWER(1024,3),2) AS size_gb
+                FROM all_tables t
+                JOIN (
+                    SELECT owner, segment_name, SUM(bytes) bytes
+                    FROM all_segments
+                    WHERE segment_type LIKE 'TABLE%'
+                    GROUP BY owner, segment_name
+                ) s ON s.owner=t.owner AND s.segment_name=t.table_name
+                WHERE {self._system_table_filter('t.owner')}
+                  AND t.partitioned = 'NO'
+                ORDER BY s.bytes DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #14: 14. Partition inventory
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_partition_inventory()
+Headers     : Schema, Table Name, Partition Count
+Description : Partitioned tables and total partition counts.
+              [Renumbered from #11]
+
+SQL Query / Implementation:
+```python
+def get_partition_inventory(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT table_owner AS schema_name,
+                   table_name,
+                   COUNT(*) AS partition_count
+            FROM dba_tab_partitions
+            WHERE {self._system_schema_filter('table_owner')}
+            GROUP BY table_owner, table_name
+            ORDER BY partition_count DESC
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT table_owner AS schema_name,
+                       table_name,
+                       COUNT(*) AS partition_count
+                FROM all_tab_partitions
+                WHERE {self._system_schema_filter('table_owner')}
+                GROUP BY table_owner, table_name
+                ORDER BY partition_count DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #15: 15. Detailed partition information
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_detailed_partition_info()
+Headers     : Schema, Table Name, Partition Name, Position, Rows (Est), Last Analyzed
+Description : Partition definitions, positions, and optimizer statistics.
+              [Renumbered from #12]
+
+SQL Query / Implementation:
+```python
+def get_detailed_partition_info(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT table_owner AS schema_name,
+                   table_name,
+                   partition_name,
+                   partition_position,
+                   num_rows,
+                   TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed
+            FROM dba_tab_partitions
+            WHERE {self._system_schema_filter('table_owner')}
+            ORDER BY table_owner, table_name, partition_position
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT table_owner AS schema_name,
+                       table_name,
+                       partition_name,
+                       partition_position,
+                       num_rows,
+                       TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed
+                FROM all_tab_partitions
+                WHERE {self._system_schema_filter('table_owner')}
+                ORDER BY table_owner, table_name, partition_position
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #16: 16. Large object columns
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_large_object_columns()
+Headers     : Schema, Table Name, Column Name, LOB Type
+Description : Tables containing BLOB, CLOB, NCLOB, or LONG columns.
+
+SQL Query / Implementation:
+```python
+def get_large_object_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   column_name,
+                   data_type
+            FROM dba_tab_columns
+            WHERE {self._system_schema_filter('owner')}
+              AND data_type IN ('BLOB','CLOB','NCLOB','LONG','LONG RAW')
+            ORDER BY owner, table_name, column_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       column_name,
+                       data_type
+                FROM all_tab_columns
+                WHERE {self._system_schema_filter('owner')}
+                  AND data_type IN ('BLOB','CLOB','NCLOB','LONG','LONG RAW')
+                ORDER BY owner, table_name, column_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #17: 17. JSON-related columns
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_json_columns()
+Headers     : Schema, Table Name, Column Name, Data Type
+Description : Columns storing JSON documents or JSON data types.
+
+SQL Query / Implementation:
+```python
+def get_json_columns(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT DISTINCT
+                c.owner AS schema_name,
+                c.table_name,
+                c.column_name,
+                c.data_type
+            FROM dba_tab_columns c
+            LEFT JOIN dba_constraints con
+                ON con.owner = c.owner
+               AND con.table_name = c.table_name
+            LEFT JOIN dba_cons_columns cc
+                ON cc.owner = con.owner
+               AND cc.constraint_name = con.constraint_name
+               AND cc.table_name = con.table_name
+               AND cc.column_name = c.column_name
+            WHERE c.data_type IN ('CLOB', 'BLOB', 'VARCHAR2', 'NVARCHAR2', 'JSON')
+              AND (
+                    c.data_type = 'JSON' 
+                    OR c.data_type LIKE '%JSON%'
+                    OR (con.search_condition_vc LIKE '%IS JSON%' AND UPPER(con.search_condition_vc) LIKE '%' || UPPER(c.column_name) || '%')
+                  )
+              AND {self._system_schema_filter('c.owner')}
+            ORDER BY c.owner, c.table_name, c.column_name
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT DISTINCT
+                    c.owner AS schema_name,
+                    c.table_name,
+                    c.column_name,
+                    c.data_type
+                FROM all_tab_columns c
+                LEFT JOIN all_constraints con
+                    ON con.owner = c.owner
+                   AND con.table_name = c.table_name
+                LEFT JOIN all_cons_columns cc
+                    ON cc.owner = con.owner
+                   AND cc.constraint_name = con.constraint_name
+                   AND cc.table_name = con.table_name
+                   AND cc.column_name = c.column_name
+                WHERE c.data_type IN ('CLOB', 'BLOB', 'VARCHAR2', 'NVARCHAR2', 'JSON')
+                  AND (
+                        c.data_type = 'JSON' 
+                        OR c.data_type LIKE '%JSON%'
+                        OR (con.search_condition_vc LIKE '%IS JSON%' AND UPPER(con.search_condition_vc) LIKE '%' || UPPER(c.column_name) || '%')
+                      )
+                  AND {self._system_schema_filter('c.owner')}
+                ORDER BY c.owner, c.table_name, c.column_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #18: 18. Primary keys
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_primary_keys()
+Headers     : Schema, Table Name, Constraint Name, Status
+Description : Primary key constraints inventory.
+
+SQL Query / Implementation:
+```python
+def get_primary_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   constraint_name,
+                   status
+            FROM dba_constraints
+            WHERE {self._system_schema_filter('owner')}
+              AND constraint_type = 'P'
+            ORDER BY owner, table_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       constraint_name,
+                       status
+                FROM all_constraints
+                WHERE {self._system_schema_filter('owner')}
+                  AND constraint_type = 'P'
+                ORDER BY owner, table_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #19: 19. Tables without primary keys
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_tables_without_primary_keys()
+Headers     : Schema, Table Name
+Description : Tables defined without an explicit Primary Key.
+
+SQL Query / Implementation:
+```python
+def get_tables_without_primary_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT t.owner AS schema_name,
+                   t.table_name
+            FROM dba_tables t
+            LEFT JOIN dba_constraints c
+              ON c.owner = t.owner
+             AND c.table_name = t.table_name
+             AND c.constraint_type = 'P'
+            WHERE {self._system_table_filter('t.owner')}
+              AND c.constraint_name IS NULL
+            ORDER BY t.owner, t.table_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT t.owner AS schema_name,
+                       t.table_name
+                FROM all_tables t
+                LEFT JOIN all_constraints c
+                  ON c.owner = t.owner
+                 AND c.table_name = t.table_name
+                 AND c.constraint_type = 'P'
+                WHERE {self._system_table_filter('t.owner')}
+                  AND c.constraint_name IS NULL
+                ORDER BY t.owner, t.table_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #20: 20. All indexes
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_all_indexes()
+Headers     : Schema, Table Name, Index Name, Index Type, Uniqueness, Status
+Description : Database indexes inventory.
+
+SQL Query / Implementation:
+```python
+def get_all_indexes(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   index_name,
+                   index_type,
+                   uniqueness,
+                   status
+            FROM dba_indexes
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY owner, table_name, index_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       index_name,
+                       index_type,
+                       uniqueness,
+                       status
+                FROM all_indexes
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY owner, table_name, index_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #21: 21. Index columns
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_index_columns()
+Headers     : Schema, Table Name, Index Name, Position, Column Name
+Description : Index column mapping positions.
+
+SQL Query / Implementation:
+```python
+def get_index_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT index_owner AS schema_name,
+                   table_name,
+                   index_name,
+                   column_position,
+                   column_name
+            FROM dba_ind_columns
+            WHERE {self._system_schema_filter('index_owner')}
+            ORDER BY index_owner, table_name, index_name, column_position
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT index_owner AS schema_name,
+                       table_name,
+                       index_name,
+                       column_position,
+                       column_name
+                FROM all_ind_columns
+                WHERE {self._system_schema_filter('index_owner')}
+                ORDER BY index_owner, table_name, index_name, column_position
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #22: 22. Index count by table
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_index_count_by_table()
+Headers     : Schema, Table Name, Index Count
+Description : Total indexes per table ranked by count.
+
+SQL Query / Implementation:
+```python
+def get_index_count_by_table(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   COUNT(*) AS index_count
+            FROM dba_indexes
+            WHERE {self._system_schema_filter('owner')}
+            GROUP BY owner, table_name
+            ORDER BY index_count DESC
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       COUNT(*) AS index_count
+                FROM all_indexes
+                WHERE {self._system_schema_filter('owner')}
+                GROUP BY owner, table_name
+                ORDER BY index_count DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #23: 23. Largest indexes
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_largest_indexes()
+Headers     : Schema, Index Name, Index Size (MB), Index Size (GB)
+Description : Top 100 largest indexes by total segment size.
+
+SQL Query / Implementation:
+```python
+def get_largest_indexes(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   segment_name AS index_name,
+                   ROUND(bytes/POWER(1024,2),2) AS index_mb,
+                   ROUND(bytes/POWER(1024,3),2) AS index_gb
+            FROM dba_segments
+            WHERE {self._system_schema_filter('owner')}
+              AND segment_type LIKE 'INDEX%'
+            ORDER BY bytes DESC
+            FETCH FIRST 100 ROWS ONLY
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       segment_name AS index_name,
+                       ROUND(bytes/POWER(1024,2),2) AS index_mb,
+                       ROUND(bytes/POWER(1024,3),2) AS index_gb
+                FROM all_segments
+                WHERE {self._system_schema_filter('owner')}
+                  AND segment_type LIKE 'INDEX%'
+                ORDER BY bytes DESC
+                FETCH FIRST 100 ROWS ONLY
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #24: 24. Foreign keys / relationships
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_foreign_keys()
+Headers     : Schema, Table Name, Constraint Name, Ref Schema, Ref Constraint
+Description : Foreign key referential constraints.
+
+SQL Query / Implementation:
+```python
+def get_foreign_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   constraint_name,
+                   r_owner AS referenced_schema,
+                   r_constraint_name AS referenced_constraint
+            FROM dba_constraints
+            WHERE {self._system_schema_filter('owner')}
+              AND constraint_type = 'R'
+            ORDER BY owner, table_name, constraint_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       constraint_name,
+                       r_owner AS referenced_schema,
+                       r_constraint_name AS referenced_constraint
+                FROM all_constraints
+                WHERE {self._system_schema_filter('owner')}
+                  AND constraint_type = 'R'
+                ORDER BY owner, table_name, constraint_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #25: 25. Detailed foreign-key columns
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_detailed_foreign_key_columns()
+Headers     : Child Schema, Child Table, Constraint, Child Column, Ref Schema, Ref Table, Ref Column, Position
+Description : Detailed column-to-column referential constraint mapping.
+
+SQL Query / Implementation:
+```python
+def get_detailed_foreign_key_columns(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT a.owner AS schema_name,
+                   a.table_name,
+                   a.constraint_name,
+                   a.column_name,
+                   c.r_owner AS referenced_schema,
+                   c_pk.table_name AS referenced_table,
+                   b.column_name AS referenced_column,
+                   a.position
+            FROM dba_cons_columns a
+            JOIN dba_constraints c
+              ON c.owner = a.owner
+             AND c.constraint_name = a.constraint_name
+            JOIN dba_constraints c_pk
+              ON c_pk.owner = c.r_owner
+             AND c_pk.constraint_name = c.r_constraint_name
+            JOIN dba_cons_columns b
+              ON b.owner = c_pk.owner
+             AND b.constraint_name = c_pk.constraint_name
+             AND b.position = a.position
+            WHERE {self._system_schema_filter('a.owner')}
+              AND c.constraint_type = 'R'
+            ORDER BY a.owner, a.table_name, a.constraint_name, a.position
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT a.owner AS schema_name,
+                       a.table_name,
+                       a.constraint_name,
+                       a.column_name,
+                       c.r_owner AS referenced_schema,
+                       c_pk.table_name AS referenced_table,
+                       b.column_name AS referenced_column,
+                       a.position
+                FROM all_cons_columns a
+                JOIN all_constraints c
+                  ON c.owner = a.owner
+                 AND c.constraint_name = a.constraint_name
+                JOIN all_constraints c_pk
+                  ON c_pk.owner = c.r_owner
+                 AND c_pk.constraint_name = c.r_constraint_name
+                JOIN all_cons_columns b
+                  ON b.owner = c_pk.owner
+                 AND b.constraint_name = c_pk.constraint_name
+                 AND b.position = a.position
+                WHERE {self._system_schema_filter('a.owner')}
+                  AND c.constraint_type = 'R'
+                ORDER BY a.owner, a.table_name, a.constraint_name, a.position
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #26: 26. Tables with many foreign-key relationships
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_tables_many_foreign_keys()
+Headers     : Schema, Table Name, Foreign Key Count
+Description : Tables ranked by number of outgoing foreign key constraints.
+
+SQL Query / Implementation:
+```python
+def get_tables_many_foreign_keys(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   COUNT(*) AS foreign_key_count
+            FROM dba_constraints
+            WHERE {self._system_schema_filter('owner')}
+              AND constraint_type = 'R'
+            GROUP BY owner, table_name
+            ORDER BY foreign_key_count DESC
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       COUNT(*) AS foreign_key_count
+                FROM all_constraints
+                WHERE {self._system_schema_filter('owner')}
+                  AND constraint_type = 'R'
+                GROUP BY owner, table_name
+                ORDER BY foreign_key_count DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #27: 27. Unique constraints
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_unique_constraints()
+Headers     : Schema, Table Name, Constraint Name, Status
+Description : Unique constraints inventory.
+
+SQL Query / Implementation:
+```python
+def get_unique_constraints(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   constraint_name,
+                   status
+            FROM dba_constraints
+            WHERE {self._system_schema_filter('owner')}
+              AND constraint_type = 'U'
+            ORDER BY owner, table_name, constraint_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       constraint_name,
+                       status
+                FROM all_constraints
+                WHERE {self._system_schema_filter('owner')}
+                  AND constraint_type = 'U'
+                ORDER BY owner, table_name, constraint_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #28: 28. Duplicate/redundant index candidates
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_duplicate_index_candidates()
+Headers     : Schema, Table Name, Index A, Index B, Leading Column
+Description : Candidate redundant indexes sharing the exact same first column.
+
+SQL Query / Implementation:
+```python
+def get_duplicate_index_candidates(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT a.index_owner AS schema_name,
+                   a.table_name,
+                   a.index_name AS index_a,
+                   b.index_name AS index_b,
+                   a.column_name AS first_column
+            FROM dba_ind_columns a
+            JOIN dba_ind_columns b
+              ON b.index_owner = a.index_owner
+             AND b.table_name = a.table_name
+             AND b.column_position = 1
+             AND b.column_name = a.column_name
+             AND b.index_name <> a.index_name
+            WHERE {self._system_schema_filter('a.index_owner')}
+              AND a.column_position = 1
+            ORDER BY a.index_owner, a.table_name, a.index_name, b.index_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT a.index_owner AS schema_name,
+                       a.table_name,
+                       a.index_name AS index_a,
+                       b.index_name AS index_b,
+                       a.column_name AS first_column
+                FROM all_ind_columns a
+                JOIN all_ind_columns b
+                  ON b.index_owner = a.index_owner
+                 AND b.table_name = a.table_name
+                 AND b.column_position = 1
+                 AND b.column_name = a.column_name
+                 AND b.index_name <> a.index_name
+                WHERE {self._system_schema_filter('a.index_owner')}
+                  AND a.column_position = 1
+                ORDER BY a.index_owner, a.table_name, a.index_name, b.index_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #29: 29. Character sets and collations
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_charsets_and_collations()
+Headers     : NLS Parameter, Value
+Description : NLS database character set configuration.
+
+SQL Query / Implementation:
+```python
+def get_charsets_and_collations(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT parameter, value
+            FROM nls_database_parameters
+            WHERE parameter IN ('NLS_CHARACTERSET','NLS_NCHAR_CHARACTERSET')
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #30: 30. Tables with comments / documentation
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_table_comments()
+Headers     : Schema, Table Name, Comments
+Description : Table documentation comments from dictionary.
+
+SQL Query / Implementation:
+```python
+def get_table_comments(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   table_name,
+                   comments
+            FROM dba_tab_comments
+            WHERE {self._system_schema_filter('owner')}
+              AND comments IS NOT NULL
+            ORDER BY owner, table_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       table_name,
+                       comments
+                FROM all_tab_comments
+                WHERE {self._system_schema_filter('owner')}
+                  AND comments IS NOT NULL
+                ORDER BY owner, table_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #31: 31. Stored procedures
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_stored_procedures()
+Headers     : Schema, Procedure Name, Status, Created, Last DDL Time
+Description : Stored procedures inventory.
+
+SQL Query / Implementation:
+```python
+def get_stored_procedures(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   object_name,
+                   status,
+                   TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                   TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+            FROM dba_objects
+            WHERE {self._system_schema_filter('owner')}
+              AND object_type = 'PROCEDURE'
+            ORDER BY owner, object_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       object_name,
+                       status,
+                       TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                       TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+                FROM all_objects
+                WHERE {self._system_schema_filter('owner')}
+                  AND object_type = 'PROCEDURE'
+                ORDER BY owner, object_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #32: 32. Functions
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_functions()
+Headers     : Schema, Function Name, Status, Created, Last DDL Time
+Description : Database functions inventory.
+
+SQL Query / Implementation:
+```python
+def get_functions(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   object_name,
+                   status,
+                   TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                   TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+            FROM dba_objects
+            WHERE {self._system_schema_filter('owner')}
+              AND object_type = 'FUNCTION'
+            ORDER BY owner, object_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       object_name,
+                       status,
+                       TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                       TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+                FROM all_objects
+                WHERE {self._system_schema_filter('owner')}
+                  AND object_type = 'FUNCTION'
+                ORDER BY owner, object_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #33: 33. Packages
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_packages()
+Headers     : Schema, Object Type, Package Name, Status, Created, Last DDL Time
+Description : Packages and package bodies inventory.
+
+SQL Query / Implementation:
+```python
+def get_packages(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   object_type,
+                   object_name,
+                   status,
+                   TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                   TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+            FROM dba_objects
+            WHERE {self._system_schema_filter('owner')}
+              AND object_type IN ('PACKAGE', 'PACKAGE BODY')
+            ORDER BY owner, object_type, object_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       object_type,
+                       object_name,
+                       status,
+                       TO_CHAR(created, 'YYYY-MM-DD HH24:MI:SS') AS created,
+                       TO_CHAR(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS') AS last_ddl_time
+                FROM all_objects
+                WHERE {self._system_schema_filter('owner')}
+                  AND object_type IN ('PACKAGE', 'PACKAGE BODY')
+                ORDER BY owner, object_type, object_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+--------------------------------------------------------------------------------
+INSIGHT #34: 34. Views
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_views()
+Headers     : Schema, View Name
+Description : Database views inventory.
+
+SQL Query / Implementation:
+```python
+def get_views(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   view_name
+            FROM dba_views
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY owner, view_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       view_name
+                FROM all_views
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY owner, view_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #35: 35. Triggers
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_triggers()
+Headers     : Schema, Trigger Name, Table Name, Event, Type, Status
+Description : Database triggers inventory.
+
+SQL Query / Implementation:
+```python
+def get_triggers(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   trigger_name,
+                   table_name,
+                   triggering_event,
+                   trigger_type,
+                   status
+            FROM dba_triggers
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY owner, table_name, trigger_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       trigger_name,
+                       table_name,
+                       triggering_event,
+                       trigger_type,
+                       status
+                FROM all_triggers
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY owner, table_name, trigger_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #36: 36. Scheduled jobs
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_scheduled_jobs()
+Headers     : Schema, Job Name, Enabled, State, Job Type, Last Start, Next Run
+Description : Oracle Scheduler jobs inventory.
+
+SQL Query / Implementation:
+```python
+def get_scheduled_jobs(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT owner AS schema_name,
+                   job_name,
+                   enabled,
+                   state,
+                   job_type,
+                   TO_CHAR(last_start_date, 'YYYY-MM-DD HH24:MI:SS') AS last_start_date,
+                   TO_CHAR(next_run_date, 'YYYY-MM-DD HH24:MI:SS') AS next_run_date
+            FROM dba_scheduler_jobs
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY next_run_date
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       job_name,
+                       enabled,
+                       state,
+                       job_type,
+                       TO_CHAR(last_start_date, 'YYYY-MM-DD HH24:MI:SS') AS last_start_date,
+                       TO_CHAR(next_run_date, 'YYYY-MM-DD HH24:MI:SS') AS next_run_date
+                FROM all_scheduler_jobs
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY next_run_date
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #37: 37. Users and privileges
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_users_and_privileges()
+Headers     : Username, Account Status, Created Date, Profile
+Description : Database user accounts and account status.
+
+SQL Query / Implementation:
+```python
+def get_users_and_privileges(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT username,
+                   account_status,
+                   TO_CHAR(created, 'YYYY-MM-DD') AS created,
+                   profile
+            FROM dba_users
+            WHERE {self._system_schema_filter('username')}
+            ORDER BY username
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT username,
+                       'OPEN' AS account_status,
+                       TO_CHAR(created, 'YYYY-MM-DD') AS created,
+                       'DEFAULT' AS profile
+                FROM all_users
+                WHERE {self._system_schema_filter('username')}
+                ORDER BY username
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #38: 38. Tablespace and segment status
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_tablespace_and_segment_status()
+Headers     : Tablespace Name, Status, Contents, Extent Management, Segment Management
+Description : Tablespace definitions and segment management parameters.
+
+SQL Query / Implementation:
+```python
+def get_tablespace_and_segment_status(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT tablespace_name,
+                   status,
+                   contents,
+                   extent_management,
+                   segment_space_management
+            FROM dba_tablespaces
+            ORDER BY tablespace_name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #39: 39. SGA / memory configuration
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_sga_memory_config()
+Headers     : Memory Component, Allocated Value (Bytes)
+Description : System Global Area (SGA) memory components.
+
+SQL Query / Implementation:
+```python
+def get_sga_memory_config(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name, TO_CHAR(value) AS value
+            FROM v$sga
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #40: 40. PGA configuration and usage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_pga_config_usage()
+Headers     : PGA Metric Name, Value
+Description : Program Global Area (PGA) metrics and limits.
+
+SQL Query / Implementation:
+```python
+def get_pga_config_usage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name, TO_CHAR(value) AS value
+            FROM v$pgastat
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #41: 41. Temporary tablespace usage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_temp_tablespace_usage()
+Headers     : Tablespace Name, Total Size, Allocated Space, Free Space
+Description : Temporary tablespaces usage and allocation.
+
+SQL Query / Implementation:
+```python
+def get_temp_tablespace_usage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT tablespace_name,
+                   tablespace_size,
+                   allocated_space,
+                   free_space
+            FROM dba_temp_free_space
+            ORDER BY tablespace_name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #42: 42. Sessions and connections
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_sessions_and_connections()
+Headers     : Session Status, Active Session Count
+Description : Active session connections count grouped by status.
+
+SQL Query / Implementation:
+```python
+def get_sessions_and_connections(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT status,
+                   COUNT(*) AS session_count
+            FROM v$session
+            GROUP BY status
+            ORDER BY status
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #43: 43. Long-running sessions
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_long_running_sessions()
+Headers     : SID, Serial#, Username, Status, Wait Event, SQL ID, Elapsed (s)
+Description : Active user sessions ranked by elapsed time.
+
+SQL Query / Implementation:
+```python
+def get_long_running_sessions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT sid,
+                   serial#,
+                   username,
+                   status,
+                   event,
+                   sql_id,
+                   last_call_et AS elapsed_seconds
+            FROM v$session
+            WHERE username IS NOT NULL
+            ORDER BY last_call_et DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #44: 44. Locks
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_locks()
+Headers     : Blocking SID, Waiting SID, Lock Type, ID1, ID2, Blocking Mode, Waiting Request
+Description : Active database locks blocking session execution.
+
+SQL Query / Implementation:
+```python
+def get_locks(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                l1.sid AS blocking_sid,
+                l2.sid AS waiting_sid,
+                l1.type,
+                l1.id1,
+                l1.id2,
+                l1.lmode AS blocking_mode,
+                l2.request AS waiting_request
+            FROM v$lock l1
+            JOIN v$lock l2
+              ON l1.id1 = l2.id1
+             AND l1.id2 = l2.id2
+            WHERE l1.block = 1
+              AND l2.request > 0
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #45: 45. Blocking sessions
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_blocking_sessions()
+Headers     : SID, Serial#, Username, Blocking SID, Wait Event, Seconds in Wait
+Description : Sessions currently waiting on blocking sessions.
+
+SQL Query / Implementation:
+```python
+def get_blocking_sessions(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT sid,
+                   serial#,
+                   username,
+                   blocking_session,
+                   event,
+                   seconds_in_wait
+            FROM v$session
+            WHERE blocking_session IS NOT NULL
+            ORDER BY seconds_in_wait DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #46: 46. Slow / resource-intensive SQL
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_slow_sql()
+Headers     : SQL ID, Executions, Elapsed (s), CPU (s), Buffer Gets, Disk Reads, Rows Processed, SQL Text Sample
+Description : Top SQL queries ranked by cumulative elapsed time from V$SQL.
+
+SQL Query / Implementation:
+```python
+def get_slow_sql(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT *
+            FROM (
+                SELECT sql_id,
+                       executions,
+                       ROUND(elapsed_time/1000000, 2) AS elapsed_seconds,
+                       ROUND(cpu_time/1000000, 2) AS cpu_seconds,
+                       buffer_gets,
+                       disk_reads,
+                       rows_processed,
+                       SUBSTR(sql_text, 1, 100) AS sql_text_sample
+                FROM v$sql
+                ORDER BY elapsed_time DESC
+            )
+            WHERE ROWNUM <= 50
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #47: 47. SQL examining large amounts of data
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_large_data_examination_sql()
+Headers     : SQL ID, Executions, Buffer Gets, Disk Reads, Rows Processed, SQL Text Sample
+Description : Top SQL queries ranked by buffer gets (data examination).
+
+SQL Query / Implementation:
+```python
+def get_large_data_examination_sql(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT *
+            FROM (
+                SELECT sql_id,
+                       executions,
+                       buffer_gets,
+                       disk_reads,
+                       rows_processed,
+                       SUBSTR(sql_text, 1, 100) AS sql_text_sample
+                FROM v$sql
+                ORDER BY buffer_gets DESC
+            )
+            WHERE ROWNUM <= 50
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #48: 48. Most frequently executed SQL
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_frequently_executed_sql()
+Headers     : SQL ID, Executions, Elapsed Seconds, SQL Text Sample
+Description : Top SQL queries ranked by cumulative execution count.
+
+SQL Query / Implementation:
+```python
+def get_frequently_executed_sql(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT *
+            FROM (
+                SELECT sql_id,
+                       executions,
+                       ROUND(elapsed_time/1000000, 2) AS elapsed_seconds,
+                       SUBSTR(sql_text, 1, 100) AS sql_text_sample
+                FROM v$sql
+                ORDER BY executions DESC
+            )
+            WHERE ROWNUM <= 50
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #49: 49. Top wait events
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_top_wait_events()
+Headers     : Event Name, Total Waits, Time Waited, Wait Seconds
+Description : System wait events ranked by total time waited.
+
+SQL Query / Implementation:
+```python
+def get_top_wait_events(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT event,
+                   total_waits,
+                   time_waited,
+                   ROUND(time_waited/100,2) AS wait_seconds
+            FROM v$system_event
+            ORDER BY time_waited DESC
+            FETCH FIRST 50 ROWS ONLY
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #50: 50. Database time / load profile
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_database_time_load_profile()
+Headers     : Sysstat Metric Name, Value
+Description : Database CPU, DB time, commits, and rollbacks metrics.
+
+SQL Query / Implementation:
+```python
+def get_database_time_load_profile(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   value
+            FROM v$sysstat
+            WHERE name IN (
+                'DB time',
+                'DB CPU',
+                'user commits',
+                'user rollbacks',
+                'execute count'
+            )
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #51: 51. Data Guard / database role
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_dataguard_db_role()
+Headers     : DB Name, DB Unique Name, Open Mode, DB Role, Protection Mode, Protection Level, Switchover Status
+Description : Oracle Data Guard role and open status.
+
+SQL Query / Implementation:
+```python
+def get_dataguard_db_role(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   db_unique_name,
+                   open_mode,
+                   database_role,
+                   protection_mode,
+                   protection_level,
+                   switchover_status
+            FROM v$database
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #52: 52. Archive log configuration
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_archive_log_config()
+Headers     : Parameter Name, Setting Value
+Description : Archive log destination and format parameters.
+
+SQL Query / Implementation:
+```python
+def get_archive_log_config(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   value
+            FROM v$parameter
+            WHERE name IN ('log_archive_dest_1','log_archive_dest_2','log_archive_format')
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #53: 53. Archive log generation
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_archive_log_generation()
+Headers     : Thread#, Sequence#, First Time, Next Time, Blocks, Block Size
+Description : Recent archive log generation history.
+
+SQL Query / Implementation:
+```python
+def get_archive_log_generation(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT thread#,
+                   sequence#,
+                   TO_CHAR(first_time, 'YYYY-MM-DD HH24:MI:SS') AS first_time,
+                   TO_CHAR(next_time, 'YYYY-MM-DD HH24:MI:SS') AS next_time,
+                   blocks,
+                   block_size
+            FROM v$archived_log
+            WHERE first_time IS NOT NULL
+            ORDER BY first_time DESC
+            FETCH FIRST 100 ROWS ONLY
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #54: 54. Redo generation
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_redo_generation()
+Headers     : Metric Name, Value
+Description : Redo size, writes, and entries statistics.
+
+SQL Query / Implementation:
+```python
+def get_redo_generation(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   value
+            FROM v$sysstat
+            WHERE name IN ('redo size','redo writes','redo entries')
+            ORDER BY name
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #55: 55. Undo configuration and usage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_undo_config_usage()
+Headers     : Undo Tablespace Name, Status, Retention (s)
+Description : Undo tablespaces status and retention settings.
+
+SQL Query / Implementation:
+```python
+def get_undo_config_usage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT tablespace_name,
+                   status,
+                   TO_CHAR(retention) AS retention
+            FROM dba_tablespaces
+            WHERE contents = 'UNDO'
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #56: 56. Oracle datafiles / physical layout
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_datafiles_physical_layout()
+Headers     : File ID, File Name, Tablespace Name, Size (GB), Autoextensible, Status
+Description : Oracle datafiles physical layout.
+
+SQL Query / Implementation:
+```python
+def get_datafiles_physical_layout(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT file_id,
+                   file_name,
+                   tablespace_name,
+                   ROUND(bytes/POWER(1024,3),2) AS size_gb,
+                   autoextensible,
+                   status
+            FROM dba_data_files
+            ORDER BY bytes DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #57: 57. ASM disk group capacity
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_asm_diskgroup_capacity()
+Headers     : Diskgroup Name, Type, Total (MB), Free (MB), Used %
+Description : ASM disk groups total capacity and free space.
+
+SQL Query / Implementation:
+```python
+def get_asm_diskgroup_capacity(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   type,
+                   total_mb,
+                   free_mb,
+                   ROUND((total_mb-free_mb)/NULLIF(total_mb,0)*100,2) AS used_pct
+            FROM v$asm_diskgroup
+            ORDER BY used_pct DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #58: 58. Database files and storage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_database_files_storage()
+Headers     : File Type Category, File Count
+Description : Database files summary by file type.
+
+SQL Query / Implementation:
+```python
+def get_database_files_storage(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT file_type,
+                   COUNT(*) AS file_count
+            FROM v$database
+            CROSS JOIN (
+                SELECT 'DATAFILE' AS file_type FROM dual
+                UNION ALL SELECT 'TEMPFILE' FROM dual
+                UNION ALL SELECT 'CONTROLFILE' FROM dual
+                UNION ALL SELECT 'ONLINE REDO' FROM dual
+            )
+            GROUP BY file_type
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #59: 59. Identify archival candidates
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_archival_candidates()
+Headers     : Schema, Table Name, Partitioned, Rows (Est), Inserts, Updates, Deletes, Last Analyzed, Last Modified
+Description : Large tables (>10k rows) with minimal DML modifications (<=100) identified for archiving.
+
+SQL Query / Implementation:
+```python
+def get_archival_candidates(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT
+                t.owner AS schema_name,
+                t.table_name,
+                t.partitioned,
+                t.num_rows,
+                NVL(m.total_inserts, 0) AS inserts,
+                NVL(m.total_updates, 0) AS updates,
+                NVL(m.total_deletes, 0) AS deletes,
+                TO_CHAR(t.last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed,
+                TO_CHAR(m.last_modified, 'YYYY-MM-DD HH24:MI:SS') AS last_modified
+            FROM dba_tables t
+            LEFT JOIN (
+                SELECT
+                    table_owner,
+                    table_name,
+                    SUM(inserts) AS total_inserts,
+                    SUM(updates) AS total_updates,
+                    SUM(deletes) AS total_deletes,
+                    MAX(timestamp) AS last_modified
+                FROM all_tab_modifications
+                GROUP BY table_owner, table_name
+            ) m ON m.table_owner = t.owner AND m.table_name = t.table_name
+            WHERE {self._system_schema_filter('t.owner')}
+              AND t.num_rows IS NOT NULL
+              AND t.num_rows > 10000
+              AND (NVL(m.total_inserts, 0) + NVL(m.total_updates, 0) + NVL(m.total_deletes, 0)) <= 100
+            ORDER BY t.num_rows DESC NULLS LAST
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT
+                    t.owner AS schema_name,
+                    t.table_name,
+                    t.partitioned,
+                    t.num_rows,
+                    NVL(m.total_inserts, 0) AS inserts,
+                    NVL(m.total_updates, 0) AS updates,
+                    NVL(m.total_deletes, 0) AS deletes,
+                    TO_CHAR(t.last_analyzed, 'YYYY-MM-DD HH24:MI:SS') AS last_analyzed,
+                    TO_CHAR(m.last_modified, 'YYYY-MM-DD HH24:MI:SS') AS last_modified
+                FROM all_tables t
+                LEFT JOIN (
+                    SELECT
+                        table_owner,
+                        table_name,
+                        SUM(inserts) AS total_inserts,
+                        SUM(updates) AS total_updates,
+                        SUM(deletes) AS total_deletes,
+                        MAX(timestamp) AS last_modified
+                    FROM all_tab_modifications
+                    GROUP BY table_owner, table_name
+                ) m ON m.table_owner = t.owner AND m.table_name = t.table_name
+                WHERE {self._system_schema_filter('t.owner')}
+                  AND t.num_rows IS NOT NULL
+                  AND t.num_rows > 10000
+                  AND (NVL(m.total_inserts, 0) + NVL(m.total_updates, 0) + NVL(m.total_deletes, 0)) <= 100
+                ORDER BY t.num_rows DESC NULLS LAST
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #60: 60. Identify tables with limited usage
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_limited_usage_tables()
+Headers     : Schema, Table Name, Inserts, Updates, Deletes, Last Modified
+Description : Tables with minimal recorded DML modifications.
+
+SQL Query / Implementation:
+```python
+def get_limited_usage_tables(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT table_owner AS schema_name,
+                   table_name,
+                   inserts,
+                   updates,
+                   deletes,
+                   TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS last_modified
+            FROM all_tab_modifications
+            WHERE {self._system_schema_filter('table_owner')}
+            ORDER BY (inserts + updates + deletes) ASC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #61: 61. Identify hot tables / objects
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_hot_tables_objects()
+Headers     : Schema, Table Name, Inserts, Updates, Deletes, Last Modified
+Description : Top active workload tables ranked by DML modifications.
+
+SQL Query / Implementation:
+```python
+def get_hot_tables_objects(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT table_owner AS schema_name,
+                   table_name,
+                   inserts,
+                   updates,
+                   deletes,
+                   TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS last_modified
+            FROM all_tab_modifications
+            WHERE {self._system_schema_filter('table_owner')}
+            ORDER BY (inserts + updates + deletes) DESC
+        """
+        return self._execute_query(query)
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #62: 62. Segment space / fragmentation candidates
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_fragmentation_candidates()
+Headers     : Schema, Segment Name, Segment Type, Size (MB), Size (GB)
+Description : Segment space allocation and fragmentation candidates.
+
+SQL Query / Implementation:
+```python
+def get_fragmentation_candidates(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT owner AS schema_name,
+                   segment_name,
+                   segment_type,
+                   ROUND(bytes/POWER(1024,2),2) AS size_mb,
+                   ROUND(bytes/POWER(1024,3),2) AS size_gb
+            FROM dba_segments
+            WHERE {self._system_schema_filter('owner')}
+            ORDER BY bytes DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT owner AS schema_name,
+                       segment_name,
+                       segment_type,
+                       ROUND(bytes/POWER(1024,2),2) AS size_mb,
+                       ROUND(bytes/POWER(1024,3),2) AS size_gb
+                FROM all_segments
+                WHERE {self._system_schema_filter('owner')}
+                ORDER BY bytes DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #63: 63. Foreign-key dependency graph
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_foreign_key_dependency_graph()
+Headers     : Child Schema, Child Table, Child Column, Ref Schema, Ref Table, Ref Column
+Description : Referential dependency graph for migration sequencing.
+
+SQL Query / Implementation:
+```python
+def get_foreign_key_dependency_graph(self) -> List[Dict[str, Any]]:
+        query = f"""
+            SELECT a.owner AS schema_name,
+                   a.table_name,
+                   a.column_name,
+                   c_pk.owner AS referenced_schema,
+                   c_pk.table_name AS referenced_table,
+                   b.column_name AS referenced_column
+            FROM dba_cons_columns a
+            JOIN dba_constraints c
+              ON c.owner = a.owner
+             AND c.constraint_name = a.constraint_name
+            JOIN dba_constraints c_pk
+              ON c_pk.owner = c.r_owner
+             AND c_pk.constraint_name = c.r_constraint_name
+            JOIN dba_cons_columns b
+              ON b.owner = c_pk.owner
+             AND b.constraint_name = c_pk.constraint_name
+             AND b.position = a.position
+            WHERE {self._system_schema_filter('a.owner')}
+              AND c.constraint_type = 'R'
+            ORDER BY a.owner, a.table_name, c_pk.table_name
+        """
+        rows = self._execute_query(query)
+        if not rows:
+            query_all = f"""
+                SELECT a.owner AS schema_name,
+                       a.table_name,
+                       a.column_name,
+                       c_pk.owner AS referenced_schema,
+                       c_pk.table_name AS referenced_table,
+                       b.column_name AS referenced_column
+                FROM all_cons_columns a
+                JOIN all_constraints c
+                  ON c.owner = a.owner
+                 AND c.constraint_name = a.constraint_name
+                JOIN all_constraints c_pk
+                  ON c_pk.owner = c.r_owner
+                 AND c_pk.constraint_name = c.r_constraint_name
+                JOIN all_cons_columns b
+                  ON b.owner = c_pk.owner
+                 AND b.constraint_name = c_pk.constraint_name
+                 AND b.position = a.position
+                WHERE {self._system_schema_filter('a.owner')}
+                  AND c.constraint_type = 'R'
+                ORDER BY a.owner, a.table_name, c_pk.table_name
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #64: 64. Stored code dependencies
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_stored_code_dependencies()
+Headers     : Programmability Object / Dependency Type, Total Count
+Description : Summary counts of Oracle stored procedures, functions, packages, views, triggers, jobs, and code dependencies.
+
+SQL Query / Implementation:
+```python
+def get_stored_code_dependencies(self) -> List[Dict[str, Any]]:
+        query_dba = f"""
+            SELECT type AS object_type,
+                   COUNT(*) AS dependency_count
+            FROM dba_dependencies
+            WHERE {self._system_schema_filter('owner')}
+            GROUP BY type
+            ORDER BY dependency_count DESC
+        """
+        rows = self._execute_query(query_dba)
+        if not rows:
+            query_all = f"""
+                SELECT type AS object_type,
+                       COUNT(*) AS dependency_count
+                FROM all_dependencies
+                WHERE {self._system_schema_filter('owner')}
+                GROUP BY type
+                ORDER BY dependency_count DESC
+            """
+            rows = self._execute_query(query_all)
+        return rows
+```
+
+
+--------------------------------------------------------------------------------
+INSIGHT #65: 65. Configuration assessment (Top 10)
+--------------------------------------------------------------------------------
+Method Name : OracleConnector.get_configuration_assessment()
+Headers     : Parameter Name, Value, Display Value
+Description : Top 10 key Oracle database initialization parameters from V$PARAMETER.
+
+SQL Query / Implementation:
+```python
+def get_configuration_assessment(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT name,
+                   value,
+                   display_value
+            FROM v$parameter
+            WHERE name IN (
+                'db_name',
+                'sga_target',
+                'pga_aggregate_target',
+                'memory_target',
+                'processes',
+                'sessions',
+                'open_cursors',
+                'db_block_size',
+                'db_recovery_file_dest_size',
+                'optimizer_mode'
+            )
+            ORDER BY CASE name
+                WHEN 'db_name' THEN 1
+                WHEN 'sga_target' THEN 2
+                WHEN 'pga_aggregate_target' THEN 3
+                WHEN 'memory_target' THEN 4
+                WHEN 'processes' THEN 5
+                WHEN 'sessions' THEN 6
+                WHEN 'open_cursors' THEN 7
+                WHEN 'db_block_size' THEN 8
+                WHEN 'db_recovery_file_dest_size' THEN 9
+                WHEN 'optimizer_mode' THEN 10
+                ELSE 11
+            END
+        """
+        return self._execute_query(query)
+```
+
+
