@@ -49,7 +49,7 @@ SUPPORTED_DATABASES = [
         "name": "PostgreSQL",
         "default_port": 5432,
         "description": "Enterprise relational database system",
-        "fields": ["host", "port", "username", "password", "database"],
+        "fields": ["host", "port", "username", "password", "database", "schema"],
         "color": "#2563EB",
         "icon": "database"
     },
@@ -169,6 +169,8 @@ async def test_connection(req: ConnectionRequest):
             db_info += f" ({req.credentials['database']})"
         elif "service_name" in req.credentials and req.credentials["service_name"]:
             db_info += f" ({req.credentials['service_name']})"
+        else:
+            db_info += " (All Databases)"
         
         return {
             "success": True,
@@ -518,6 +520,29 @@ def _generate_dynamic_io_trend(base_iops: int, time_range: str, reports: List[Di
     return res
 
 
+def _parse_size_mb(val_str: str) -> float:
+    if not val_str or str(val_str).strip() in ["-", "N/A", "None", ""]:
+        return 0.0
+    s = str(val_str).strip()
+    match = re.search(r"([\d\.]+)\s*(GB|MB|KB|TB|Bytes|B)?", s, re.IGNORECASE)
+    if not match:
+        return 0.0
+    try:
+        num = float(match.group(1))
+    except ValueError:
+        return 0.0
+    unit = (match.group(2) or "MB").upper()
+    if unit == "GB":
+        return num * 1024.0
+    elif unit == "TB":
+        return num * 1024.0 * 1024.0
+    elif unit == "KB":
+        return num / 1024.0
+    elif unit in ("BYTES", "B"):
+        return num / (1024.0 * 1024.0)
+    return num
+
+
 def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h", connector: Any = None) -> Dict[str, Any]:
     now_iso = time.strftime("%Y-%m-%d %H:%M:%S IST", time.localtime())
 
@@ -548,7 +573,17 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
         headers = r.get("headers", [])
 
         # 1. Database Size / Storage
-        if any(k in title_lower for k in ["database/schema inventory", "database inventory", "database sizes", "schema inventory", "tablespace", "storage analysis"]):
+        if any(k in title_lower for k in ["database/schema inventory", "database inventory", "database sizes", "database schema sizes", "schema sizes", "schema inventory", "tablespace", "storage analysis", "database file configuration"]):
+            total_mb_found = 0.0
+            size_gb_col = -1
+            size_mb_col = -1
+            for idx, h in enumerate(headers):
+                hl = str(h).lower()
+                if "total_size_gb" in hl or "data_size_gb" in hl or "size (gb)" in hl:
+                    size_gb_col = idx
+                elif "actual_size_mb" in hl or "size (mb)" in hl or "size_mb" in hl:
+                    size_mb_col = idx
+
             for row in rows:
                 if len(row) >= 2:
                     first_col = str(row[0]).upper()
@@ -560,21 +595,24 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
                                 found_size = c_str
                                 break
                         if found_size:
-                            if not re.search(r"(?i)(GB|MB|KB|TB|Bytes)", found_size):
-                                try:
-                                    num_val = float(found_size)
-                                    if num_val >= 1024:
-                                        found_size = f"{round(num_val / 1024, 2)} GB"
-                                    elif 0.0 < num_val < 1.0:
-                                        found_size = f"{found_size} GB"
-                                    else:
-                                        found_size = f"{found_size} MB"
-                                except ValueError:
-                                    pass
                             raw_kpis["database_size"] = found_size
+                    else:
+                        if first_col not in ["INFORMATION_SCHEMA", "PERFORMANCE_SCHEMA", "MYSQL", "SYS", "MASTER", "MSDB", "MODEL", "TEMPDB"]:
+                            if size_gb_col != -1 and size_gb_col < len(row):
+                                sz = _parse_size_mb(str(row[size_gb_col])) * 1024.0
+                            elif size_mb_col != -1 and size_mb_col < len(row):
+                                sz = _parse_size_mb(str(row[size_mb_col]))
+                            else:
+                                sz = _parse_size_mb(str(row[-1]))
+                            total_mb_found += sz
+            if raw_kpis["database_size"] == "N/A" and total_mb_found > 0:
+                if total_mb_found >= 1024.0:
+                    raw_kpis["database_size"] = f"{round(total_mb_found / 1024.0, 2)} GB"
+                else:
+                    raw_kpis["database_size"] = f"{round(total_mb_found, 2)} MB"
 
         # 2. Total Tables
-        if any(k in title_lower for k in ["row count", "table inventory", "no of tables", "table row counts", "table storage", "table-level"]):
+        if any(k in title_lower for k in ["row count", "table inventory", "no of tables", "table row counts", "table storage", "table-level", "top 100 tables", "schema/table storage"]):
             raw_kpis["total_tables"] = max(raw_kpis["total_tables"], len(rows))
 
         # 3. Active Connections / Sessions
@@ -582,6 +620,8 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
             found_threads_metric = False
             questions_val = None
             uptime_val = None
+            sum_session_counts = 0
+            has_count_col = False
             for row in rows:
                 if len(row) >= 2:
                     k_str = str(row[0]).lower().strip()
@@ -607,23 +647,32 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
                             uptime_val = float(re.sub(r"[^\d.]", "", v_str))
                         except ValueError:
                             pass
+                    elif any(s in k_str for s in ["active", "idle", "waiting", "running"]) and re.search(r"\d", v_str):
+                        has_count_col = True
+                        try:
+                            cnt = int(re.sub(r"[^\d]", "", v_str))
+                            sum_session_counts += cnt
+                        except ValueError:
+                            pass
 
             if questions_val is not None and uptime_val is not None and uptime_val > 0:
                 raw_kpis["qps"] = round(questions_val / uptime_val, 1)
 
-            if not found_threads_metric and len(rows) > 0:
-                if not any("threads_" in str(r[0]).lower() for r in rows if len(r) >= 1):
+            if not found_threads_metric:
+                if has_count_col and sum_session_counts > 0:
+                    raw_kpis["active_connections"] = sum_session_counts
+                elif len(rows) > 0 and not any("threads_" in str(r[0]).lower() for r in rows if len(r) >= 1):
                     raw_kpis["active_connections"] = len(rows)
 
         # 4. Blocking Sessions
-        if any(k in title_lower for k in ["blocking sessions", "lock waits", "blocked queries", "deadlocks", "lock contention"]):
+        if any(k in title_lower for k in ["blocking sessions", "lock waits", "blocked queries", "lock contention"]):
             blocked_cnt = 0
             for row in rows:
                 row_str = " ".join(str(val).upper() for val in (row if isinstance(row, (list, tuple)) else row.values()))
                 if any(w in row_str for w in ["WAITING", "BLOCKED", "LOCK WAIT", "CONVERTING"]):
                     blocked_cnt += 1
             if blocked_cnt == 0 and "data locks" not in title_lower:
-                if any(k in title_lower for k in ["blocking sessions", "blocked queries", "deadlocks"]):
+                if any(k in title_lower for k in ["blocking sessions", "blocked queries"]):
                     blocked_cnt = len(rows)
             raw_kpis["blocking_sessions"] = blocked_cnt
 
@@ -640,14 +689,19 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
                         pass
 
         # 6. Storage Breakdown
-        if any(k in title_lower for k in ["data vs index", "total table vs index", "total data vs index", "index vs data", "index ratio"]):
+        if any(k in title_lower for k in ["data vs index", "total table vs index", "total data vs index", "index vs data", "index ratio", "data vs log"]):
             if not storage_breakdown:
                 for row in rows:
                     if len(row) >= 2:
-                        storage_breakdown.append({"label": str(row[0]), "value": str(row[1])})
+                        if "data vs log" in title_lower and len(row) >= 3:
+                            storage_breakdown.append({"label": "Data", "value": f"{row[1]} GB" if not str(row[1]).endswith("GB") else str(row[1])})
+                            storage_breakdown.append({"label": "Log", "value": f"{row[2]} GB" if not str(row[2]).endswith("GB") else str(row[2])})
+                            break
+                        else:
+                            storage_breakdown.append({"label": str(row[0]), "value": str(row[1])})
 
         # 7. Top 10 Largest Tables
-        if any(k in title_lower for k in ["top 100", "table-level storage", "largest tables", "table sizes", "top tables"]):
+        if any(k in title_lower for k in ["top 100", "table-level storage", "largest tables", "table sizes", "top tables", "largest segments"]):
             if not top_tables and rows:
                 db_col_idx = -1
                 tbl_col_idx = -1
@@ -658,11 +712,11 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
                     h_l = str(h).lower()
                     if any(w in h_l for w in ["database", "db_name", "dbname"]) and db_col_idx == -1:
                         db_col_idx = idx
-                    if ("table name" in h_l or "relation" in h_l or "table" in h_l) and not any(w in h_l for w in ["count", "space", "type", "rows"]):
+                    if ("table name" in h_l or "relation" in h_l or "segment name" in h_l or "segment" in h_l or "table" in h_l) and not any(w in h_l for w in ["count", "space", "type", "rows"]):
                         if tbl_col_idx == -1: tbl_col_idx = idx
-                    if "size (gb)" in h_l or "gb" in h_l:
+                    if ("size (gb)" in h_l or "gb" in h_l or "reserved (gb)" in h_l):
                         if size_gb_idx == -1: size_gb_idx = idx
-                    elif "size (mb)" in h_l or "mb" in h_l or "size" in h_l:
+                    elif ("size (mb)" in h_l or "mb" in h_l or "size" in h_l or "reserved" in h_l):
                         if size_mb_idx == -1: size_mb_idx = idx
 
                 for row in rows:
@@ -820,6 +874,98 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
             logger.warning("Error collecting native top I/O metrics: %s", e)
             io_metrics_reason = "Insufficient workload data for analysis."
 
+    # Fallback Top CPU Query Collector from gathered reports across all engines
+    if not cpu_queries_available:
+        for r in reports:
+            t_l = r.get("title", "").lower()
+            if any(k in t_l for k in ["top cpu queries", "slow / resource-intensive sql", "slow queries", "long-running requests"]):
+                r_rows = r.get("rows", [])
+                r_headers = [str(h).lower() for h in r.get("headers", [])]
+                q_idx = -1
+                cpu_idx = -1
+                for idx, h in enumerate(r_headers):
+                    if any(w in h for w in ["query sample", "sql text", "query", "sql_text_sample"]):
+                        q_idx = idx
+                    elif any(w in h for w in ["cpu", "total sec", "elapsed", "latency"]) and cpu_idx == -1:
+                        cpu_idx = idx
+                if q_idx == -1 and len(r_headers) > 0:
+                    q_idx = len(r_headers) - 1 if ("query" in r_headers[-1] or "sql" in r_headers[-1]) else 0
+                if cpu_idx == -1 and len(r_headers) > 1:
+                    cpu_idx = 1
+
+                extracted_items = []
+                for row in r_rows[:10]:
+                    if len(row) > max(q_idx, cpu_idx):
+                        raw_q = str(row[q_idx])
+                        try:
+                            cpu_num = float(re.sub(r"[^\d.]", "", str(row[cpu_idx])))
+                        except ValueError:
+                            cpu_num = 0.0
+                        clean_q = _clean_text_label(raw_q, max_len=30)
+                        cpu_u = "ms" if (cpu_idx < len(r_headers) and "ms" in r_headers[cpu_idx]) else "s"
+                        extracted_items.append({
+                            "full_query": raw_q,
+                            "query_text": clean_q,
+                            "query": clean_q,
+                            "cpu_time": cpu_num,
+                            "cpu_unit": cpu_u,
+                            "metric": f"{cpu_num} {cpu_u}",
+                            "timestamp": now_iso
+                        })
+                if extracted_items:
+                    tot_cpu = sum(item["cpu_time"] for item in extracted_items)
+                    for item in extracted_items:
+                        item["cpu_percentage"] = round((item["cpu_time"] / tot_cpu * 100.0), 1) if tot_cpu > 0 else 0.0
+                    cpu_queries = extracted_items
+                    cpu_queries_available = True
+                    break
+
+    # Fallback Top I/O Metric Collector from gathered reports across all engines
+    if not io_metrics_available:
+        for r in reports:
+            t_l = r.get("title", "").lower()
+            if any(k in t_l for k in ["top io queries", "sql examining", "table i/o activity", "workload"]):
+                r_rows = r.get("rows", [])
+                r_headers = [str(h).lower() for h in r.get("headers", [])]
+                ent_idx = -1
+                io_idx = -1
+                for idx, h in enumerate(r_headers):
+                    if any(w in h for w in ["table name", "relation", "sql text", "query", "sample"]):
+                        ent_idx = idx
+                    elif any(w in h for w in ["read", "io", "gets", "operations", "shared blks"]) and io_idx == -1:
+                        io_idx = idx
+                if ent_idx == -1 and len(r_headers) > 0:
+                    ent_idx = 1 if len(r_headers) > 1 else 0
+                if io_idx == -1 and len(r_headers) > 2:
+                    io_idx = 2
+
+                extracted_io = []
+                for row in r_rows[:10]:
+                    if len(row) > max(ent_idx, io_idx):
+                        raw_ent = str(row[ent_idx])
+                        try:
+                            io_num = int(float(re.sub(r"[^\d.]", "", str(row[io_idx]))))
+                        except ValueError:
+                            io_num = 0
+                        clean_ent = _clean_text_label(raw_ent, max_len=30)
+                        extracted_io.append({
+                            "full_entity_name": raw_ent,
+                            "full_name": raw_ent,
+                            "entity_name": clean_ent,
+                            "name": clean_ent,
+                            "io_operations": io_num,
+                            "io_unit": "ops",
+                            "metric": f"{io_num} ops",
+                            "timestamp": now_iso
+                        })
+                if extracted_io:
+                    tot_io = sum(item["io_operations"] for item in extracted_io)
+                    for item in extracted_io:
+                        item["percentage_of_total"] = round((item["io_operations"] / tot_io * 100.0), 1) if tot_io > 0 else 0.0
+                    io_waits = extracted_io
+                    io_metrics_available = True
+                    break
+
     # QPS calculation
     if total_exec_count > 0:
         raw_kpis["qps"] = min(25000, max(0, int(total_exec_count / 10)))
@@ -916,6 +1062,46 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
             logger.warning("Error invoking get_qps_kpi: %s", e)
 
     storage_val = raw_kpis["database_size"]
+    if storage_val in ["N/A", "0.00 MB", "0.00MB", "0 MB", "0MB", "0.00"]:
+        total_mb = 0.0
+        active_db = ""
+        if active_connection and isinstance(active_connection, dict) and "credentials" in active_connection:
+            creds = active_connection.get("credentials", {})
+            active_db = creds.get("database") or creds.get("service_name") or creds.get("dbname") or ""
+
+        for r in reports:
+            t = r.get("title", "").lower()
+            rows = r.get("rows", [])
+            if any(k in t for k in ["schema sizes", "database inventory", "database sizes", "schema inventory", "database/schema inventory"]):
+                for row in rows:
+                    if len(row) >= 2:
+                        db_name = str(row[0]).strip()
+                        if active_db and db_name.lower() == active_db.lower():
+                            sz = _parse_size_mb(str(row[-1]))
+                            if sz > 0:
+                                total_mb = sz
+                                break
+                        if db_name.lower() not in ["information_schema", "performance_schema", "mysql", "sys", "master", "model", "msdb", "tempdb"]:
+                            total_mb += _parse_size_mb(str(row[-1]))
+                if total_mb > 0:
+                    break
+
+            if total_mb == 0 and any(k in t for k in ["data vs index", "top 100", "table-level storage", "table wise size"]):
+                for row in rows:
+                    for cell in row:
+                        if re.search(r"(?i)(GB|MB|KB|TB)", str(cell)):
+                            total_mb += _parse_size_mb(str(cell))
+                            break
+                if total_mb > 0:
+                    break
+
+        if total_mb > 0:
+            if total_mb >= 1024.0:
+                storage_val = f"{round(total_mb / 1024.0, 2)} GB"
+            else:
+                storage_val = f"{round(total_mb, 2)} MB"
+            raw_kpis["database_size"] = storage_val
+
     tables_count = raw_kpis["total_tables"]
     growth_str = "+0.00 GB" if "GB" in str(storage_val) else "+0.00 MB"
     storage_kpi = {
@@ -956,6 +1142,21 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
         except Exception as e:
             logger.warning("Error invoking get_blocked_sessions_kpi: %s", e)
 
+    # Explicit Deadlocks KPI Collector
+    deadlocks_kpi = {
+        "count": 0,
+        "status": "Normal",
+        "status_text": "Zero Contention",
+        "period_str": period_str,
+        "insight": "Zero deadlocks detected in engine telemetry."
+    }
+    if connector and hasattr(connector, "get_deadlocks_kpi"):
+        try:
+            res_dl = connector.get_deadlocks_kpi(time_range)
+            if res_dl and res_dl.get("count") is not None:
+                deadlocks_kpi = res_dl
+        except Exception as e:
+            logger.warning("Error invoking get_deadlocks_kpi: %s", e)
 
     # Explicit Top Wait Events Chart Collector
     wait_status_code = "no_waits"
@@ -1063,6 +1264,7 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
         "qps": qps_kpi,
         "storage": storage_kpi,
         "blocked_sessions": blocked_kpi,
+        "deadlocks": deadlocks_kpi,
         "cache": cache_kpi,
         "cache_hit_ratio": cache_kpi["hit_ratio"],
         "total_insights": len(reports)
@@ -1138,6 +1340,7 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
     return {
         "health_summary": health_summary,
         "summary_kpis": summary_kpis,
+        "kpis": summary_kpis,
         "cpu_trend": cpu_trend,
         "io_trend": io_trend,
         "storage_breakdown": storage_breakdown,
@@ -1170,8 +1373,13 @@ def _extract_charts_summary(reports: List[Dict[str, Any]], time_range: str = "1h
 
 @app.post("/api/insights")
 async def get_database_insights(req: ConnectionRequest):
+    global active_connection
     try:
         explorer = _create_and_connect_explorer(req.database_type, req.credentials)
+        active_connection = {
+            "database_type": req.database_type,
+            "credentials": req.credentials
+        }
         
         fetchers_map = {
             "MySQL": explorer._get_mysql_fetchers,
@@ -1183,23 +1391,44 @@ async def get_database_insights(req: ConnectionRequest):
         if req.database_type not in fetchers_map:
             raise HTTPException(status_code=400, detail=f"Insights not implemented for {req.database_type}")
 
+        from database_queries import get_insight_query, get_all_engine_queries
+
         fetchers = fetchers_map[req.database_type]()
         reports = []
 
         for label, fetcher in fetchers:
+            clean_label = re.sub(r"^\d+\.\s*", "", label).strip()
+            meta = (
+                get_insight_query(req.database_type, label)
+                or get_insight_query(req.database_type, clean_label)
+            )
             try:
                 data = fetcher()
-                data["title"] = label
+                orig_title = data.get("title", "")
+                data["title"] = clean_label
+                if not meta and orig_title:
+                    meta = get_insight_query(req.database_type, orig_title)
+                if meta:
+                    data["query"] = meta.get("query", "")
+                    data["method"] = meta.get("method", "")
+                    data["description"] = meta.get("description", "")
+                    data["category"] = meta.get("category", "")
                 reports.append(data)
             except Exception as e:
                 logger.warning("Failed gathering insight '%s': %s", label, e)
-                reports.append({
-                    "title": label,
+                err_dict = {
+                    "title": clean_label,
                     "headers": ["Error Status"],
                     "rows": [],
                     "error": str(e),
                     "note": f"Query execution failed: {str(e)}"
-                })
+                }
+                if meta:
+                    err_dict["query"] = meta.get("query", "")
+                    err_dict["method"] = meta.get("method", "")
+                    err_dict["description"] = meta.get("description", "")
+                    err_dict["category"] = meta.get("category", "")
+                reports.append(err_dict)
 
         charts_summary = _extract_charts_summary(reports, time_range=req.time_range or "1h", connector=explorer.connector)
 
@@ -1216,6 +1445,204 @@ async def get_database_insights(req: ConnectionRequest):
     except Exception as e:
         logger.error("Failed fetching insights: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.get("/api/database-queries")
+async def get_database_queries_endpoint(database_type: str = "MySQL"):
+    """API endpoint to retrieve all defined queries and methods for an engine."""
+    from database_queries import get_all_engine_queries
+    queries = get_all_engine_queries(database_type)
+    return {"success": True, "database_type": database_type, "queries": queries}
+
+
+@app.get("/api/insight-query")
+async def get_single_insight_query(title: str, database_type: str = "MySQL"):
+    """API endpoint to retrieve the native SQL query definition for any insight by title or keyword."""
+    from database_queries import get_insight_query
+    meta = get_insight_query(database_type, title)
+    if meta:
+        return {
+            "success": True,
+            "title": meta.get("title", title),
+            "query": meta.get("query", ""),
+            "description": meta.get("description", ""),
+            "method": meta.get("method", ""),
+            "category": meta.get("category", "Observability"),
+        }
+    return {"success": False, "query": "", "title": title}
+
+
+@app.get("/api/table-columns")
+async def get_table_columns_endpoint(table: str, database: Optional[str] = None):
+    """API endpoint to retrieve detailed column metadata for a table."""
+    global active_connection
+    if not active_connection or "database_type" not in active_connection:
+        return {"success": False, "columns": [], "error": "No active database connection"}
+
+    db_type = active_connection.get("database_type")
+    creds = active_connection.get("credentials")
+    try:
+        explorer = _create_and_connect_explorer(db_type, creds)
+        conn = explorer.connector.connection
+        columns = []
+        if db_type == "MySQL":
+            cursor = conn.cursor(dictionary=True)
+            if database:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        column_type,
+                        is_nullable, 
+                        column_default, 
+                        column_key, 
+                        extra, 
+                        column_comment 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND table_schema = %s
+                    ORDER BY ordinal_position
+                """, (table, database))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        column_type,
+                        is_nullable, 
+                        column_default, 
+                        column_key, 
+                        extra, 
+                        column_comment 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND table_schema NOT IN ('information_schema','mysql','performance_schema','sys')
+                    ORDER BY ordinal_position
+                """, (table,))
+            columns = cursor.fetchall()
+            cursor.close()
+        elif db_type == "PostgreSQL":
+            cursor = conn.cursor()
+            if database:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        udt_name AS column_type,
+                        is_nullable, 
+                        column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND table_schema = %s
+                    ORDER BY ordinal_position
+                """, (table, database))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        udt_name AS column_type,
+                        is_nullable, 
+                        column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND table_schema NOT IN ('information_schema', 'pg_catalog')
+                    ORDER BY ordinal_position
+                """, (table,))
+            rows = cursor.fetchall()
+            cols = [desc[0] for desc in cursor.description]
+            columns = [dict(zip(cols, r)) for r in rows]
+            cursor.close()
+        elif db_type == "SQL Server":
+            cursor = conn.cursor()
+            if database:
+                cursor.execute("""
+                    SELECT 
+                        COLUMN_NAME AS column_name, 
+                        DATA_TYPE AS data_type, 
+                        DATA_TYPE AS column_type,
+                        IS_NULLABLE AS is_nullable, 
+                        COLUMN_DEFAULT AS column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = ? AND TABLE_SCHEMA = ?
+                    ORDER BY ORDINAL_POSITION
+                """, (table, database))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        COLUMN_NAME AS column_name, 
+                        DATA_TYPE AS data_type, 
+                        DATA_TYPE AS column_type,
+                        IS_NULLABLE AS is_nullable, 
+                        COLUMN_DEFAULT AS column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = ?
+                    ORDER BY ORDINAL_POSITION
+                """, (table,))
+            rows = cursor.fetchall()
+            cols = [desc[0].lower() for desc in cursor.description]
+            columns = [dict(zip(cols, r)) for r in rows]
+            cursor.close()
+        elif db_type == "Oracle":
+            cursor = conn.cursor()
+            if database:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        data_type AS column_type,
+                        nullable AS is_nullable, 
+                        data_default AS column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM all_tab_columns 
+                    WHERE table_name = :tbl AND owner = :db
+                    ORDER BY column_id
+                """, {"tbl": table.upper(), "db": database.upper()})
+            else:
+                cursor.execute("""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        data_type AS column_type,
+                        nullable AS is_nullable, 
+                        data_default AS column_default, 
+                        '' AS column_key, 
+                        '' AS extra, 
+                        '' AS column_comment 
+                    FROM all_tab_columns 
+                    WHERE table_name = :tbl
+                    ORDER BY column_id
+                """, {"tbl": table.upper()})
+            rows = cursor.fetchall()
+            cols = [desc[0].lower() for desc in cursor.description]
+            columns = [dict(zip(cols, r)) for r in rows]
+            cursor.close()
+
+        normalized_columns = []
+        for c in columns:
+            norm_c = {}
+            for k, v in c.items():
+                norm_c[str(k).lower()] = v
+            if norm_c.get("column_default") is not None:
+                norm_c["column_default"] = str(norm_c["column_default"]).strip()
+            normalized_columns.append(norm_c)
+        columns = normalized_columns
+
+        return {"success": True, "table": table, "database": database, "columns": columns}
+    except Exception as e:
+        logger.warning("Error fetching table columns for %s: %s", table, e)
+        return {"success": False, "columns": [], "error": str(e)}
 
 
 @app.post("/api/export-pdf")

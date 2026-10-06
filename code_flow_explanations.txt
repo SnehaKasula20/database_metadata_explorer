@@ -1,214 +1,434 @@
 ================================================================================
-           DATABASE METADATA EXPLORER - SYSTEM & CODE FLOW GUIDE
+  DATABASE METADATA EXPLORER — COMPLETE CODE FLOW & ARCHITECTURE GUIDE
 ================================================================================
 
-1. SYSTEM ARCHITECTURE & OVERVIEW
+This document provides a comprehensive, end-to-end reference for the entire 
+Database Metadata Explorer project structure, specifying every single file, class, 
+function/method, and HTTP REST API route across all 8 execution flows, followed 
+by an exact tab-by-tab breakdown for all 13 Observability Tabs, Data Insights EDA, 
+and PDF Export flows.
+
+
+================================================================================
+1. PROJECT DIRECTORY STRUCTURE & LAYER MAP
+================================================================================
+
+database_metadata_explorer/
+│
+├── main.py                             [Entry Point Launcher]
+│   └── Functions: main(), start_web_server()
+│
+├── app.py                              [FastAPI Web Application Server]
+│   └── Routes: GET /, GET /api/databases, GET /api/saved-config,
+│               POST /api/connect, POST /api/insights, GET /api/insight-query,
+│               GET /api/table-columns, GET /api/table-drilldown,
+│               GET /api/data-insights/*, POST /api/data-insights/profile,
+│               POST /api/export-pdf, POST /api/data-insights/export-pdf
+│   └── Helpers: _create_and_connect_explorer(), _evaluate_status(),
+│                _generate_health_summary(), _generate_dynamic_cpu_trend(),
+│                _generate_dynamic_io_trend()
+│
+├── database_metadata_explorer.py       [Metadata Orchestrator Class]
+│   └── Class: DatabaseMetadataExplorer
+│   └── Methods: display_database_options(), get_database_choice(),
+│                get_credentials(), create_connection(), save_config(),
+│                _get_mysql_fetchers(), _get_postgres_fetchers(),
+│                _get_oracle_fetchers(), _get_sqlserver_fetchers()
+│
+├── config/                             [Configuration & Credentials Persistence]
+│   ├── config.py                       - Function: load_database_config()
+│   └── database_config.json            - JSON persistent credentials file
+│
+├── database_connectors/                [Database Driver Connectors]
+│   ├── base.py                         - Class: BaseDatabaseConnector (Abstract)
+│   ├── mysql.py                        - Class: MySQLConnector (mysql.connector)
+│   ├── postgres.py                     - Class: PostgreSQLConnector (psycopg2)
+│   ├── oracle.py                       - Class: OracleConnector (oracledb Thin Mode)
+│   └── sqlserver.py                    - Class: SQLServerConnector (pyodbc + ODBC 18)
+│
+├── database_queries/                   [Native SQL Query Registries]
+│   ├── __init__.py                     - Functions: get_insight_query(), get_all_engine_queries()
+│   ├── mysql.py                        - Functions: get_query(), get_all_queries() (58 queries)
+│   ├── postgres.py                     - Functions: get_query(), get_all_queries() (61 queries)
+│   ├── oracle.py                       - Functions: get_query(), get_all_queries() (65 queries)
+│   └── sqlserver.py                    - Functions: get_query(), get_all_queries() (60 queries)
+│
+├── data_insights_service.py            [EDA Profiling Service Wrapper]
+│   └── Class: DataInsightsService
+│   └── Methods: map_credentials(), get_connector(), list_databases(),
+│                list_schemas(), list_tables(), profile_table(),
+│                _build_dashboard_payload()
+│
+├── datainsights/EDA/                   [In-Memory Exploratory Data Analysis Engine]
+│   ├── application.py                  - Class: InteractiveEDAApplication
+│   ├── config.py                       - Class: ConfigurationManager
+│   ├── connectors.py                   - Classes: DatabaseConnectorFactory, MySqlConnector,
+│   │                                              PostgresConnector, OracleConnector, SqlServerConnector
+│   ├── sources.py                      - Class: DataLoader (load_table_as_df)
+│   ├── semantics.py                    - Classes: MissingValueNormalizer, ColumnTypeDetector,
+│   │                                              SemanticSchemaRefiner
+│   ├── quality.py                      - Classes: DataInconsistencyAnalyzer, DuplicateRecordAnalyzer
+│   ├── profiling.py                    - Class: DatasetProfiler (profile)
+│   ├── imputation.py                    - Class: ImputationRecommender (add_recommendations)
+│   ├── reporting.py                    - Classes: EDAReportEntry, PDFStatisticsReportWriter
+│   ├── output.py                       - Classes: LocalOutputWriter, DataQualityValidator
+│   └── spark.py                        - Classes: SparkSessionManager, DummySparkSession
+│
+├── pdf_generator.py                    [ReportLab PDF Document Generator]
+│   └── Classes: PDFReportGenerator, NumberedCanvas
+│   └── Methods: generate_report(), generate_data_insights_report(),
+│                _build_header(), _add_page_number()
+│
+├── generate_queries_modules.py         [Developer Query Module Generator]
+│   └── Functions: parse_engine(), write_module()
+│
+├── mysql_insights_and_queries.txt      [Raw Query Documentation Files]
+├── postgres_insights_and_queries.txt
+├── oracle_insights_and_queries.txt
+├── sqlserver_insights_and_queries.txt
+│
+└── static/                             [Web Single Page Application Frontend]
+    ├── index.html                      - HTML5, Tailwind CSS, Lucide icons, Chart.js SPA
+    ├── chart.js                        - Local Chart.js library fallback
+    └── lucide.js                       - Local Lucide icons library fallback
+
+
+================================================================================
+2. DETAILED TAB-BY-TAB CODE FLOW (FOR ALL 13 OBSERVABILITY TABS)
+================================================================================
+
 --------------------------------------------------------------------------------
-The Database Metadata Explorer is a modern web-based observability and data quality
-analytics platform supporting PostgreSQL, MySQL, SQL Server, and Oracle.
-
-The system consists of two primary operational modules:
-  1. Database Insights : Real-time performance KPIs, health assessment, 8 visual charts,
-                         and deep metadata suite analysis.
-  2. Data Insights     : In-memory exploratory data analysis (EDA), semantic column profiling,
-                         structural inconsistency detection, duplicate tracking, and missing value
-                         imputation recommendations.
-
-Architecture Layers:
-  - Frontend SPA      : `static/index.html` (Tabbed navigation, Chart.js, Lucide icons, Tailwind CSS).
-  - Web Server API    : `app.py` (FastAPI REST service, KPI extraction, status evaluator).
-  - Metadata Engine   : `database_metadata_explorer.py` & `database_connectors/` (PostgreSQL, MySQL, SQL Server, Oracle).
-  - Profiling Engine  : `datainsights/EDA/` (In-memory Pandas profiling, quality analyzers, imputation).
-  - Service Layer     : `data_insights_service.py` (Wrapper for Data Insights API endpoints).
-  - Export Engine     : `pdf_generator.py` (ReportLab document generator for Database & Data Insights PDF reports).
-
-
-2. CORE COMPONENT DIRECTORY
+TAB 1: OVERVIEW TAB
 --------------------------------------------------------------------------------
-File / Directory                   | Role & Primary Responsibilities
+- Frontend Renderer  : renderOverviewTab() in static/index.html
+- Data Pipeline      :
+  1. Frontend calls: POST /api/insights
+  2. app.py executes: _generate_health_summary(), _generate_dynamic_cpu_trend(), _generate_dynamic_io_trend()
+  3. database_metadata_explorer.py executes fetchers:
+     - _get_<engine>_database_count_data
+     - _get_<engine>_table_level_storage_analysis_data
+     - _get_<engine>_top_100_largest_tables_data
+  4. index.html calls helpers:
+     - getDynamicStorageBreakdown()
+     - parseStorageToMb(), formatSmartStorage()
+     - getActualSlowQueries(), getActualDeadlockCount()
+- Components Rendered:
+  * 8 Top KPI Cards (Database Size, Base Tables, Active Connections, Health, Slow Queries, Long Tx, Deadlocks, Tables W/O PK).
+  * Storage Composition Donut Chart (Data vs Index split).
+  * Top Databases by Size Bar Chart.
+  * Quick Engine Architecture Summary Matrix.
+
 --------------------------------------------------------------------------------
-app.py                             | FastAPI web application hosting REST APIs:
-                                   | - Endpoints: `/api/connect`, `/api/insights`, `/api/export-pdf`,
-                                   |   `/api/data-insights/*`.
-                                   | - Logic: Extracts KPI & chart metrics (`_extract_charts_summary`),
-                                   |   evaluates status (`_evaluate_status`), generates health summary.
-
-database_metadata_explorer.py      | Orchestrates database metadata suite execution across all connectors.
-                                   | Normalizes raw SQL query outputs into standard table dictionaries.
-
-database_connectors/               | Engine connectors executing native SQL metadata queries:
-  - postgres.py                    | - PostgreSQL (pg_stat_statements, pg_stat_activity, pg_class).
-  - mysql.py                       | - MySQL (information_schema, performance_schema, sys).
-  - sqlserver.py                   | - SQL Server (sys.dm_exec_query_stats, sys.dm_os_wait_stats).
-  - oracle.py                      | - Oracle (DBA_SEGMENTS, DBA_USERS, DBA_CONSTRAINTS, V$SESSION).
-
-datainsights/EDA/                  | Native Pandas/NumPy in-memory profiling suite (< 0.1s execution):
-  - connectors.py                  | - Database query execution with pushdown limit (`LIMIT`, `TOP`, `ROWNUM`).
-  - semantics.py                   | - `MissingValueNormalizer` & `ColumnTypeDetector` (semantic type inference).
-  - quality.py                     | - `DataInconsistencyAnalyzer` & `DuplicateRecordAnalyzer`.
-  - profiling.py                   | - `DatasetProfiler` (descriptive statistics & categorical distributions).
-  - imputation.py                  | - `ImputationRecommender` (rule-based missing value strategies).
-
-data_insights_service.py           | Bridge service connecting REST API to EDA profiling pipeline.
-
-pdf_generator.py                   | ReportLab PDF engine generating standard ReportLab documents with:
-                                   | - Navy Blue headers (`#1E3A8A`), Calibri/Helvetica typography.
-                                   | - Dynamic `NumberedCanvas` ("Page X of Y"), auto text wrapping via `Paragraph`.
-                                   | - Numbered sections (1. Source Info, 2. Summary, ..., 9. Column Profiles).
-
-static/index.html                  | Single Page Application rendering tabbed UI, 6 KPI cards, Chart.js graphs,
-                                   | metadata table accordions, and PDF export controls.
-
-
-3. STEP-BY-STEP EXECUTION TRACE (WHAT HAPPENS WHEN YOU RUN `python app.py`)
+TAB 2: STORAGE TAB
 --------------------------------------------------------------------------------
+- Frontend Renderer  : renderStorageTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up report: findReport('Data Vs Index Storage') or findReport('Total Data Vs Index Storage')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_table_level_storage_analysis_data
+     - _get_mysql_data_vs_index_footprint_data
+     - _get_postgres_storage_capacity_data
+     - _get_oracle_tablespace_usage_data
+     - _get_sqlserver_database_sizes_data
+     - _get_<engine>_top_100_largest_tables_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-storage-top100-container', report, { enableDrill: true })
+- Components Rendered:
+  * Storage KPIs (Total Footprint, Data Footprint, Index Footprint, Avg Table Size).
+  * Data vs Index Stacked Bar Chart.
+  * Top 100 Largest Tables Table (with 1-click [Inspect] buttons).
+  * Storage Volume Tiering Breakdown (Tier 1 >=1GB down to Tier 4 <1MB).
 
-[STEP 1: LAUNCHING SERVER (`python app.py`)]
-  - Command      : `python app.py`
-  - Entry File   : `app.py`
-  - Execution    : Python runs the main block at the bottom of `app.py`:
-                   `uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)`
-  - Output       : Starts Uvicorn server listening for HTTP requests on `http://localhost:8000`.
-
-[STEP 2: OPENING WEB DASHBOARD (`http://localhost:8000`)]
-  - User Action  : Opens `http://localhost:8000` in browser.
-  - API Route    : `GET /`
-  - Method       : `read_root()` in `app.py`
-  - Execution    : Serves `static/index.html` (the Single Page Application UI).
-  - Browser Runs :
-      1. Loads UI layout, Chart.js, Lucide icons, and CSS styles.
-      2. Calls `GET /api/databases` -> `get_databases()` in `app.py` (returns list of MySQL, PostgreSQL, SQL Server, Oracle).
-      3. Calls `GET /api/saved-config` -> `get_saved_config()` in `app.py` -> invokes `explorer.load_database_config()` in `database_metadata_explorer.py` (reads `config/database_config.json` to pre-fill saved hosts/usernames).
-
-[STEP 3: CONNECTING TO DATABASE]
-  - User Action  : Chooses a database, fills credentials (host, port, username, password), and clicks "Connect".
-  - API Route    : `POST /api/connect`
-  - Method       : `connect_database()` in `app.py`
-  - Execution    :
-      1. Calls `_create_and_connect_explorer(database_type, credentials)` in `app.py`.
-      2. Instantiates `DatabaseMetadataExplorer` from `database_metadata_explorer.py`.
-      3. Instantiates specific connector based on DB type:
-         - MySQL      -> `MySQLConnector` in `database_connectors/mysql.py`
-         - PostgreSQL -> `PostgreSQLConnector` in `database_connectors/postgres.py`
-         - SQL Server -> `SQLServerConnector` in `database_connectors/sqlserver.py`
-         - Oracle     -> `OracleConnector` in `database_connectors/oracle.py`
-      4. Executes `connector.connect()`, which opens DB connection via driver (`mysql.connector`, `psycopg2`, `pyodbc`, `oracledb`).
-      5. Returns success status `{"status": "connected"}` to browser.
-
-[STEP 4: FETCHING DATABASE INSIGHTS & DASHBOARD KPIs]
-  - User Action  : Automatic call after connection success.
-  - API Route    : `POST /api/insights`
-  - Method       : `get_insights()` in `app.py`
-  - Execution    :
-      1. Re-establishes DB connection via `_create_and_connect_explorer()`.
-      2. Gets query fetcher functions from `explorer._get_<db>_fetchers()` in `database_metadata_explorer.py`.
-      3. Loops through fetchers, calling SQL query methods on connector (e.g. `connector.get_top_100_largest_tables()`, `connector.get_wait_events()`).
-      4. Normalizes raw SQL dicts via `explorer._normalize_rows()` in `database_metadata_explorer.py` (formats numbers & KB/MB/GB strings).
-      5. Calls `_extract_charts_summary(reports)` in `app.py`:
-         - Extracts 6 KPI metrics (CPU %, IOPS, Active Connections, QPS, Storage Size, Blocked Sessions) using `_evaluate_status()`.
-         - Builds 8 Chart.js data models (CPU trend, IO trend, Top CPU queries, Top IO queries, Wait stats, Cache hit gauge, Storage pie, Top 10 largest tables).
-         - Calls `_generate_health_summary()` to score overall status & findings.
-      6. Returns JSON payload to browser.
-  - Browser Runs : `renderDashboard(data)` and `renderAllCharts(charts)` in `static/index.html` to update KPI cards, draw Chart.js graphs, and show report accordions.
-
-[STEP 5: PROFILING DATA INSIGHTS (EDA TAB)]
-  - User Action  : Switches to `[ Data Insights ]` tab, selects a Database/Schema/Table, and clicks **Analyze Data**.
-  - API Routes   :
-      - `GET /api/data-insights/databases` -> `data_insights_service.get_databases()`
-      - `GET /api/data-insights/schemas`   -> `data_insights_service.get_schemas()`
-      - `GET /api/data-insights/tables`    -> `data_insights_service.get_tables()`
-      - `POST /api/data-insights/profile`  -> `profile_table()` in `app.py`
-  - Execution    :
-      1. `app.py` calls `data_insights_service.profile_table()` in `data_insights_service.py`.
-      2. Connector in `datainsights/EDA/connectors.py` executes pushdown SQL (`SELECT * FROM <table> LIMIT <N>`) into a Pandas DataFrame.
-      3. Profiling pipeline runs in `datainsights/EDA/`:
-         - `DataInconsistencyAnalyzer.analyze()` in `quality.py` (checks format issues).
-         - `MissingValueNormalizer.normalize()` in `semantics.py` (standardizes null tokens).
-         - `ColumnTypeDetector.infer()` in `semantics.py` (infers semantic types).
-         - `DuplicateRecordAnalyzer.analyze()` in `quality.py` (counts duplicate rows).
-         - `DatasetProfiler.profile()` in `profiling.py` (calculates mean, median, stddev, min, max).
-         - `ImputationRecommender.add_recommendations()` in `imputation.py` (proposes median/mode imputations).
-      4. Returns JSON payload to browser.
-  - Browser Runs : `renderDataInsightsResults(data)` and `renderDiCharts(charts)` in `static/index.html` to display 4 KPI cards, 6 charts, quality findings, and profiling tables.
-
-[STEP 6: EXPORTING PDF REPORT]
-  - User Action  : Clicks top header button "Export PDF Report" or "Export Data Insights PDF".
-  - API Route    : `POST /api/export-pdf` OR `POST /api/data-insights/export-pdf`
-  - Method       : `export_pdf()` OR `export_data_insights_pdf()` in `app.py`
-  - Execution    :
-      1. Calls `PDFReportGenerator.generate_report()` or `generate_data_insights_report()` in `pdf_generator.py`.
-      2. ReportLab engine builds formatted PDF with Navy Blue headers, alternating row colors, paragraph text wrapping, and page numbering.
-      3. Returns binary PDF stream back to browser for automatic download.
-
-
-4. DATABASE INSIGHTS END-TO-END FLOW
 --------------------------------------------------------------------------------
-1. Engine & Credentials Selection:
-   - Frontend loads supported databases from `GET /api/databases`.
-   - Saved credentials can be pre-filled from `config/database_config.json` via `GET /api/saved-config`.
-   - User submits credentials -> `POST /api/connect` validates database connection health.
-
-2. Fetching & Normalization:
-   - Frontend calls `POST /api/insights` with credentials.
-   - Connector executes SQL queries across metadata views (tables, performance statistics, locks, waits).
-   - Explorer normalizes results into standard header/row datasets.
-
-3. KPI Extraction & Health Scoring:
-   - `app.py` parses report datasets to extract 6 operational KPIs:
-       1. CPU Utilization (%)
-       2. I/O Operations (IOPS)
-       3. Active Connections
-       4. Queries per Second (QPS)
-       5. Database Storage (MB/GB)
-       6. Blocked Sessions
-   - `app.py` generates 8 Chart.js data models (CPU trend, IO trend, Top CPU queries, Top IO queries,
-     Top wait events, Cache hit gauge, Storage breakdown, Top 10 largest tables).
-   - `_generate_health_summary()` computes overall health status (Healthy, Normal, Elevated, High, Critical)
-     and top data-driven findings.
-
-4. UI Rendering:
-   - Frontend displays Health Banner, 6 KPI Cards, 8 visual Chart.js graphs, and search-filterable metadata accordions.
-
-
-5. DATA INSIGHTS (EDA PROFILING) END-TO-END FLOW
+TAB 3: I/O TAB
 --------------------------------------------------------------------------------
-1. Table Selection:
-   - User switches to `[ Data Insights ]` tab.
-   - Frontend populates Database, Schema, and Table dropdown selectors via `/api/data-insights/*`.
-   - User selects target table and Sample Limit (`Top 100 Rows` to `All Rows`).
+- Frontend Renderer  : renderIoTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Table I/O Activity'), findReport('Table Wait Time')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_table_io_waits_data
+     - _get_postgres_temp_file_usage_data
+     - _get_oracle_pga_config_usage_data
+     - _get_sqlserver_tempdb_usage_data
+     - _get_<engine>_memory_cache_statistics_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-io-activity-container', findReport('Table I/O Activity'))
+     - renderTableComponent('table-wait-time-container', findReport('Table Wait Time'))
+- Components Rendered:
+  * Table I/O wait times and read/write operations per second.
+  * Buffer Pool cache hit ratio & memory cache efficiency.
+  * Temporary file allocations and disk swap usage.
 
-2. In-Memory Profiling Pipeline:
-   - User clicks **Analyze Data** -> `POST /api/data-insights/profile`.
-   - Connector executes pushdown query (`SELECT * FROM table LIMIT/TOP N`).
-   - EDA pipeline processes dataframe in-memory (< 0.1s):
-       a. `MissingValueNormalizer`: Converts null-like strings (`"N/A"`, `"null"`) to actual `None`.
-       b. `ColumnTypeDetector`: Infers semantic types (`IDENTIFIER`, `TIMESTAMP`, `NUMERICAL`, `CATEGORICAL`, etc.).
-       c. `DataInconsistencyAnalyzer`: Detects mixed data types, trailing spaces, and format issues.
-       d. `DuplicateRecordAnalyzer`: Counts exact row duplicates and group sizes.
-       e. `DatasetProfiler`: Computes descriptive stats (`mean`, `median`, `stddev`, `min`, `max`, `q1`, `q3`, `iqr`).
-       f. `ImputationRecommender`: Proposes column imputation techniques (Median, Mode, Constant).
-
-3. UI Rendering:
-   - Displays 4 Summary KPIs (Rows, Cols, Missing Cells %, Duplicates %).
-   - Displays 6 Chart.js graphs (Missing by Col, Data Quality, Duplicates, Semantic Types, Numeric Means, Categorical Top Values).
-   - Renders structural inconsistency cards, column profiling tables, and imputation recommendations.
-
-
-6. PDF REPORT GENERATION FLOW
 --------------------------------------------------------------------------------
-1. Export Action:
-   - User clicks top header PDF export button (`Export PDF Report` or `Export Data Insights PDF`).
+TAB 4: QUERY PERFORMANCE TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderQueriesTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Slow Queries'), findReport('High Data Examination SQL'), findReport('Frequently Executed SQL')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_slow_queries_data
+     - _get_postgres_slow_sql_data
+     - _get_oracle_slow_sql_data
+     - _get_sqlserver_top_cpu_queries_data
+     - _get_<engine>_frequently_executed_sql_data
+     - _get_<engine>_large_data_examination_sql_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-slow-queries-container', slowReport)
+     - renderTableComponent('table-high-examined-container', highExaminedReport)
+- Components Rendered:
+  * Slow Query Digest Log (with `[</> View SQL]` modal button).
+  * High Data Examination SQL (scanned rows vs returned rows ratio).
+  * Frequently Executed SQL Queries & CPU execution time rankings.
 
-2. Backend Report Building:
-   - Frontend calls `POST /api/export-pdf` or `POST /api/data-insights/export-pdf`.
-   - `pdf_generator.py` formats data into ReportLab `Flowable` elements.
-   - Styling parameters:
-       - Header Bar   : Navy Blue background (`#1E3A8A`) with white bold text.
-       - Grid & Rows  : Alternating `#FFFFFF` / `#F9FAFB` row backgrounds, `#E5E7EB` grid lines.
-       - Text Wrapping: All table cells wrapped in `Paragraph` objects to prevent overflow.
-       - Page Numbers : `NumberedCanvas` computes total pages dynamically ("Page X of Y").
-       - Section Layout: Data Insights PDF includes explicit numbered sections (1 to 9) matching table layout style.
+--------------------------------------------------------------------------------
+TAB 5: CONNECTIONS TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderConnectionsTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Active Connections'), findReport('Sessions And Connections')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_processlist_data
+     - _get_postgres_sessions_and_connections_data
+     - _get_oracle_sessions_and_connections_data
+     - _get_sqlserver_active_sessions_data
+     - _get_<engine>_long_running_sessions_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-connections-container', tel.rawReport)
+- Components Rendered:
+  * Active vs Idle thread session count.
+  * Host/IP connection origin distribution.
+  * Process list table (User, Host, Command, Time, State, Info).
 
-3. File Delivery:
-   - Binary PDF stream returned directly to client browser for instant download.
+--------------------------------------------------------------------------------
+TAB 6: LOCKS TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderLocksTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Real-Time Locks'), findReport('Blocking Sessions'), findReport('Deadlocks')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_lock_waits_data
+     - _get_postgres_locks_data
+     - _get_oracle_locks_data
+     - _get_sqlserver_blocking_sessions_data
+     - _get_<engine>_blocking_sessions_data
+     - _get_sqlserver_deadlock_xevent_sessions_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-locks-container', tel.locksReport)
+     - renderTableComponent('table-deadlocks-container', tel.dlReport)
+- Components Rendered:
+  * Real-time table and row lock contention.
+  * Blocking session tree (Victim PID vs Blocking PID).
+  * Deadlock history log and lock wait timeout alerts.
+
+--------------------------------------------------------------------------------
+TAB 7: INDEXES TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderIndexesTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Tables Without Primary Keys'), findReport('Potential Duplicate Indexes'), findReport('Largest Indexes')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_tables_without_primary_keys_data
+     - _get_postgres_tables_without_primary_keys_data
+     - _get_oracle_without_primary_keys_data
+     - _get_sqlserver_tables_without_primary_keys_data
+     - _get_<engine>_duplicate_index_candidates_data
+     - _get_<engine>_largest_indexes_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-nopk-container', findReport('Tables Without Primary Keys'), { enableDrill: true })
+     - renderTableComponent('table-dup-indexes-container', findReport('Potential Duplicate Indexes'))
+- Components Rendered:
+  * Tables Without Primary Keys warning table (with [Inspect] buttons).
+  * Duplicate and overlapping index recommendations.
+  * Largest indexes ranking and index usage statistics.
+
+--------------------------------------------------------------------------------
+TAB 8: SCHEMA TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderSchemaTab() & renderFkGraph() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Master (Parent) Tables'), findReport('Child Tables'), findReport('Foreign Keys')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_master_tables_data
+     - _get_postgres_master_tables_data
+     - _get_oracle_master_tables_data
+     - _get_sqlserver_master_tables_data
+     - _get_<engine>_child_tables_data
+     - _get_<engine>_foreign_keys_data
+  3. index.html calls renderers:
+     - renderTableComponent('table-master-tables-container', findReport('Master (Parent) Tables'), { enableDrill: true })
+     - renderFkGraph() -> Draws interactive SVG/D3 schema relationship graph.
+- Components Rendered:
+  * Parent tables with incoming child dependencies.
+  * Child tables with outgoing foreign key references.
+  * Independent standalone lookup tables.
+  * Interactive Foreign Key Relationship Graph.
+
+--------------------------------------------------------------------------------
+TAB 9: STRUCTURE TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderStructureTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('JSON Columns'), findReport('Generated Columns'), findReport('Character Sets And Collations')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_json_columns_data
+     - _get_postgres_json_columns_data
+     - _get_oracle_json_columns_data
+     - _get_<engine>_charsets_and_collations_data
+     - _get_<engine>_large_object_columns_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-json-columns-container', findReport('JSON Columns'), { enableDrill: true })
+- Components Rendered:
+  * Semi-structured JSON / JSONB column inventory.
+  * Virtual and stored generated columns.
+  * Table character set collations.
+  * Large Object (BLOB / CLOB / TEXT) columns listing.
+
+--------------------------------------------------------------------------------
+TAB 10: OBJECTS TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderObjectsTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Stored Procedures'), findReport('Views'), findReport('Triggers'), findReport('Scheduled Jobs / Events')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_stored_procedures_data
+     - _get_postgres_stored_procedures_data
+     - _get_oracle_stored_procedures_data
+     - _get_sqlserver_stored_procedures_data
+     - _get_<engine>_views_data
+     - _get_<engine>_triggers_data
+     - _get_<engine>_scheduled_jobs_data
+  3. index.html filters system schemas:
+     - Filter: isSystemSchema(schemaName) -> Hides 'mysql', 'sys', 'information_schema', 'pg_catalog', 'master', 'SYS'.
+  4. index.html calls table renderer:
+     - renderTableComponent('table-procedures-container', procReport)
+     - renderTableComponent('table-views-container', viewReport)
+- Components Rendered:
+  * User-defined Stored Procedures & Functions.
+  * Database Views table.
+  * DML Triggers table.
+  * Scheduled Events & Cron Jobs table.
+
+--------------------------------------------------------------------------------
+TAB 11: REPLICATION TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderReplicationTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Replication Status'), findReport('Binary Log Configuration'), findReport('GTID Configuration')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_replication_status_data
+     - _get_postgres_replication_status_data
+     - _get_oracle_dataguard_db_role_data
+     - _get_sqlserver_always_on_availability_status_data
+     - _get_<engine>_wal_archive_configuration_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-replication-container', repStatus)
+- Components Rendered:
+  * Primary / Replica replication state & lag seconds.
+  * Binary log / WAL log file size & retention.
+  * GTID / Data Guard / AlwaysOn synchronization status.
+
+--------------------------------------------------------------------------------
+TAB 12: SECURITY TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderSecurityTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Users And Privileges'), findReport('Database Roles'), findReport('Host Permissions')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_users_and_privileges_data
+     - _get_postgres_users_and_roles_data
+     - _get_oracle_users_and_privileges_data
+     - _get_sqlserver_server_logins_and_roles_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-users-privileges-container', findReport('Users And Privileges'))
+- Components Rendered:
+  * Database User Accounts matrix.
+  * Host permission rules (`'%'` wildcard warnings).
+  * Server roles and administrative privileges.
+  * SSL connection encryption status.
+
+--------------------------------------------------------------------------------
+TAB 13: ENVIRONMENT TAB
+--------------------------------------------------------------------------------
+- Frontend Renderer  : renderEnvironmentTab() in static/index.html
+- Data Pipeline      :
+  1. index.html looks up reports: findReport('Version And Environment'), findReport('Configuration Assessment')
+  2. database_metadata_explorer.py executes fetchers:
+     - _get_mysql_environment_info_data
+     - _get_postgres_memory_configuration_data
+     - _get_oracle_environment_info_data
+     - _get_sqlserver_server_environment_data
+  3. index.html calls table renderer:
+     - renderTableComponent('table-env-info-container', findReport('Version And Environment'))
+     - renderTableComponent('table-config-assessment-container', findReport('Configuration Assessment'))
+- Components Rendered:
+  * Database Engine Version, hostname, and operating system.
+  * Server uptime & data directory file path.
+  * Global configuration parameters & configuration optimization recommendations.
+
+
+================================================================================
+3. DATA INSIGHTS (EDA) & EXPORT PDF WORKFLOW TRACES
+================================================================================
+
+--------------------------------------------------------------------------------
+A. DATA INSIGHTS (IN-MEMORY EXPLORATORY DATA ANALYSIS - EDA) FLOW
+--------------------------------------------------------------------------------
+Goal: Stream database table rows into Pandas, detect nulls/duplicates, infer semantic types, and compute statistical column profiles.
+
+Step 1: User switches to [ Data Insights ] tab in navigation bar.
+        - Frontend: static/index.html -> switchViewMode('datainsights')
+        - Populates dropdowns via GET endpoints:
+          * GET /api/data-insights/databases -> app.py get_eda_databases() -> DataInsightsService.list_databases()
+          * GET /api/data-insights/schemas   -> app.py get_eda_schemas()   -> DataInsightsService.list_schemas()
+          * GET /api/data-insights/tables    -> app.py get_eda_tables()    -> DataInsightsService.list_tables()
+
+Step 2: User selects Table and Sample Size (e.g. 1000 rows), then clicks "Analyze Data".
+        - Frontend: static/index.html -> runDataInsightsAnalysis()
+        - Sends HTTP POST request to `/api/data-insights/profile` with payload.
+
+Step 3: FastAPI endpoint delegates to DataInsightsService:
+        - File   : app.py
+        - Route  : POST /api/data-insights/profile
+        - Method : async def profile_dataset(req: EDAProfileRequest)
+        - Service: data_insights_service.profile_table(db_type, creds, db_name, schema, table_name, sample_size)
+
+Step 4: EDA Pipeline Execution (datainsights/EDA/):
+        1. Connect to DB  : DatabaseConnectorFactory.get_connector(...) in datainsights/EDA/connectors.py
+        2. Load to Pandas : DataLoader.load_table_as_df(...) in datainsights/EDA/sources.py (SELECT * FROM table LIMIT size)
+        3. Clean Nulls    : MissingValueNormalizer.normalize(df) in datainsights/EDA/semantics.py ('N/A', 'null' -> np.nan)
+        4. Detect Semantics: SemanticSchemaRefiner.refine(df) in datainsights/EDA/semantics.py (Email, Currency, UUID, ID, Timestamp)
+        5. Quality Checks : DataInconsistencyAnalyzer.analyze(df) & DuplicateRecordAnalyzer.analyze(df) in datainsights/EDA/quality.py
+        6. Compute Stats  : DatasetProfiler.profile(df) in datainsights/EDA/profiling.py (mean, median, stddev, min, max, quantiles)
+        7. Imputations    : ImputationRecommender.add_recommendations(df, profiles) in datainsights/EDA/imputation.py
+        8. Report Dict    : EDAReportEntry.to_dict() in datainsights/EDA/reporting.py
+
+Step 5: Frontend renders interactive EDA dashboard:
+        - Frontend: static/index.html -> renderDataInsightsResults(data)
+        - Renders Quality Scorecard (0-100), Missingness Distribution Chart, Semantic Types Donut Chart, Column Statistics Table, and Imputation Recommendations.
+
+
+--------------------------------------------------------------------------------
+B. PDF REPORT EXPORT FLOWS (OBSERVABILITY & DATA INSIGHTS)
+--------------------------------------------------------------------------------
+Goal: Convert observability metrics or EDA profiling data into styled Navy Blue ReportLab PDF documents.
+
+[OPTION 1] Observability Dashboard PDF Export:
+  1. User clicks "Export PDF Report" in navbar.
+  2. Frontend: static/index.html -> exportObservabilityPdf() -> POST /api/export-pdf
+  3. Backend : app.py -> @app.post("/api/export-pdf") -> async def export_pdf(req: PDFExportRequest)
+  4. Builder : pdf_generator.py -> PDFReportGenerator(filepath).generate_report(report_data)
+     - _build_header(canvas, doc)    -> Draws Navy Blue top banner (#1E3A8A) & logo.
+     - add_key_value_table(...)      -> Draws executive KPI scorecards grid.
+     - add_report_table(...)         -> Formats metric tables with alternating row shading.
+     - NumberedCanvas.draw_page_decorations() -> Writes footer "Page X of Y" and execution timestamp.
+     - doc.build(story, canvasmaker=NumberedCanvas) -> Compiles binary PDF document.
+  5. Response: app.py returns FileResponse(pdf_path, media_type="application/pdf").
+  6. Browser : Triggers automatic file download to user's computer.
+
+[OPTION 2] Data Insights (EDA) PDF Export:
+  1. User clicks "Export Data Insights PDF".
+  2. Frontend: static/index.html -> exportDataInsightsPdf() -> POST /api/data-insights/export-pdf
+  3. Backend : app.py -> @app.post("/api/data-insights/export-pdf") -> async def export_eda_pdf(req)
+  4. Builder : pdf_generator.py -> PDFReportGenerator.generate_data_insights_report(profile_data) OR datainsights/EDA/reporting.py -> PDFStatisticsReportWriter.save(filepath, report_entry)
+  5. Response: app.py returns FileResponse(pdf_path, media_type="application/pdf") for browser download.
 ================================================================================

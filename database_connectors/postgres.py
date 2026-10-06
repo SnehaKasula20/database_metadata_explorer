@@ -16,16 +16,37 @@ class PostgreSQLConnector(BaseDatabaseConnector):
     }
 
     def connect(self) -> None:
-        dbname = self.credentials.get("database") or "postgres"
-        if dbname.lower() in {"all", "all databases", "*", "all dbs"}:
+        dbname = (self.credentials.get("database") or "").strip()
+        if not dbname or dbname.lower() in {"all", "all databases", "*", "all dbs"}:
             dbname = "postgres"
-        self.connection = psycopg2.connect(
-            host=self.credentials["host"],
-            port=self.credentials["port"],
-            user=self.credentials["username"],
-            password=self.credentials["password"],
-            dbname=dbname,
-        )
+        
+        try:
+            self.connection = psycopg2.connect(
+                host=self.credentials["host"],
+                port=self.credentials["port"],
+                user=self.credentials["username"],
+                password=self.credentials["password"],
+                dbname=dbname,
+            )
+        except Exception:
+            # Fallback if default 'postgres' database does not exist on cluster
+            if dbname == "postgres":
+                for fallback_db in [self.credentials.get("username"), "template1"]:
+                    if fallback_db:
+                        try:
+                            self.connection = psycopg2.connect(
+                                host=self.credentials["host"],
+                                port=self.credentials["port"],
+                                user=self.credentials["username"],
+                                password=self.credentials["password"],
+                                dbname=fallback_db,
+                            )
+                            break
+                        except Exception:
+                            continue
+            if not self.connection:
+                raise
+
         self.connection.autocommit = True
         self._db_conn_cache = {}
 
@@ -52,7 +73,7 @@ class PostgreSQLConnector(BaseDatabaseConnector):
         return conn
 
     def _system_schema_filter(self, col: str = "n.nspname") -> str:
-        return f"{col} NOT IN ('pg_catalog', 'information_schema') AND {col} NOT LIKE 'pg_toast%' AND {col} NOT LIKE 'pg_temp_%'"
+        return f"{col} NOT IN ('pg_catalog', 'information_schema') AND {col} NOT LIKE 'pg_%'"
 
     def _table_or_view_exists(self, relation_name: str) -> bool:
         if not self.connection:

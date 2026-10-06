@@ -105,6 +105,7 @@ SELECT
 FROM information_schema.tables 
 WHERE table_schema NOT IN 
 ('information_schema','mysql','performance_schema','sys') 
+AND table_type = 'BASE TABLE'
 ORDER BY (data_length + index_length) DESC;
         """
         try:
@@ -187,7 +188,8 @@ SELECT
     ROUND(SUM(data_length + index_length) / 1024 / 1024 / 1024 / 1024, 6) AS total_tb
 FROM information_schema.tables
 WHERE table_schema NOT IN
-('information_schema','mysql','performance_schema','sys');
+('information_schema','mysql','performance_schema','sys')
+AND table_type = 'BASE TABLE';
         """
         try:
             cursor = self.connection.cursor(dictionary=True)
@@ -333,6 +335,8 @@ SELECT
 FROM information_schema.tables 
 WHERE table_schema NOT IN 
 ('information_schema','mysql','performance_schema','sys') 
+AND table_type = 'BASE TABLE'
+AND engine IS NOT NULL
 GROUP BY engine 
 ORDER BY SUM(data_length + index_length) DESC;
         """
@@ -345,7 +349,7 @@ ORDER BY SUM(data_length + index_length) DESC;
                 {
                     "engine_name": row.get("engine")
                     or row.get("ENGINE")
-                    or "VIEW/NULL",
+                    or "Unknown",
                     "table_count": (
                         row.get("table_count")
                         if row.get("table_count") is not None
@@ -397,6 +401,7 @@ SELECT
 FROM information_schema.tables 
 WHERE table_schema NOT IN 
 ('information_schema','mysql','performance_schema','sys') 
+AND table_type = 'BASE TABLE'
 AND engine <> 'InnoDB' 
 ORDER BY (data_length + index_length) DESC;
         """
@@ -643,6 +648,7 @@ SELECT
 FROM information_schema.tables 
 WHERE table_schema NOT IN 
 ('information_schema','mysql','performance_schema','sys') 
+AND table_type = 'BASE TABLE'
 AND table_name NOT IN ( 
     SELECT DISTINCT table_name 
     FROM information_schema.partitions 

@@ -31,20 +31,57 @@ class OracleConnector(BaseDatabaseConnector):
         "APEX_040200",
         "APEX_050000",
         "APEX_200200",
+        "APEX_PUBLIC_USER",
+        "OJVMSYS",
+        "ORDDATA",
+        "ORDSYS",
+        "SI_INFORMTN_SCHEMA",
+        "XS$NULL",
     }
 
     def connect(self) -> None:
+        service_name = (
+            self.credentials.get("service_name")
+            or self.credentials.get("database")
+            or self.credentials.get("sid")
+            or ""
+        ).strip()
+
+        if not service_name or service_name.lower() in {"all", "all databases", "*"}:
+            service_name = "ORCLCDB"
+
         dsn = oracledb.makedsn(
             self.credentials["host"],
             self.credentials["port"],
-            service_name=self.credentials["service_name"],
+            service_name=service_name,
         )
 
-        self.connection = oracledb.connect(
-            user=self.credentials["username"],
-            password=self.credentials["password"],
-            dsn=dsn,
-        )
+        try:
+            self.connection = oracledb.connect(
+                user=self.credentials["username"],
+                password=self.credentials["password"],
+                dsn=dsn,
+            )
+        except Exception:
+            # If default ORCLCDB failed, attempt common service name defaults
+            if service_name == "ORCLCDB" and not (self.credentials.get("service_name") or self.credentials.get("database")):
+                for fallback_service in ["ORCL", "XE", "FREE"]:
+                    try:
+                        fallback_dsn = oracledb.makedsn(
+                            self.credentials["host"],
+                            self.credentials["port"],
+                            service_name=fallback_service,
+                        )
+                        self.connection = oracledb.connect(
+                            user=self.credentials["username"],
+                            password=self.credentials["password"],
+                            dsn=fallback_dsn,
+                        )
+                        break
+                    except Exception:
+                        continue
+            if not self.connection:
+                raise
 
     def _system_schema_filter(self, col: str = "OWNER") -> str:
         schemas = "', '".join(sorted(self.SYSTEM_SCHEMAS))
@@ -936,27 +973,31 @@ class OracleConnector(BaseDatabaseConnector):
     # 21. Largest indexes
     def get_largest_indexes(self) -> List[Dict[str, Any]]:
         query = f"""
-            SELECT owner AS schema_name,
-                   segment_name AS index_name,
-                   ROUND(bytes/POWER(1024,2),2) AS index_mb,
-                   ROUND(bytes/POWER(1024,3),2) AS index_gb
-            FROM dba_segments
-            WHERE {self._system_schema_filter('owner')}
-              AND segment_type LIKE 'INDEX%'
-            ORDER BY bytes DESC
+            SELECT s.owner AS schema_name,
+                   i.table_name AS table_name,
+                   s.segment_name AS index_name,
+                   ROUND(s.bytes/POWER(1024,2),2) AS index_mb,
+                   ROUND(s.bytes/POWER(1024,3),2) AS index_gb
+            FROM dba_segments s
+            LEFT JOIN all_indexes i ON s.owner = i.owner AND s.segment_name = i.index_name
+            WHERE {self._system_schema_filter('s.owner')}
+              AND s.segment_type LIKE 'INDEX%'
+            ORDER BY s.bytes DESC
             FETCH FIRST 100 ROWS ONLY
         """
         rows = self._execute_query(query)
         if not rows:
             query_all = f"""
-                SELECT owner AS schema_name,
-                       segment_name AS index_name,
-                       ROUND(bytes/POWER(1024,2),2) AS index_mb,
-                       ROUND(bytes/POWER(1024,3),2) AS index_gb
-                FROM all_segments
-                WHERE {self._system_schema_filter('owner')}
-                  AND segment_type LIKE 'INDEX%'
-                ORDER BY bytes DESC
+                SELECT s.owner AS schema_name,
+                       i.table_name AS table_name,
+                       s.segment_name AS index_name,
+                       ROUND(s.bytes/POWER(1024,2),2) AS index_mb,
+                       ROUND(s.bytes/POWER(1024,3),2) AS index_gb
+                FROM all_segments s
+                LEFT JOIN all_indexes i ON s.owner = i.owner AND s.segment_name = i.index_name
+                WHERE {self._system_schema_filter('s.owner')}
+                  AND s.segment_type LIKE 'INDEX%'
+                ORDER BY s.bytes DESC
                 FETCH FIRST 100 ROWS ONLY
             """
             rows = self._execute_query(query_all)

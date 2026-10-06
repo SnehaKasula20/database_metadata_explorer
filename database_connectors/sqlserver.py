@@ -946,6 +946,8 @@ class SQLServerConnector(BaseDatabaseConnector):
                 v.modify_date
             FROM sys.views v
             JOIN sys.schemas s ON s.schema_id = v.schema_id
+            WHERE s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
+              AND v.is_ms_shipped = 0
             ORDER BY s.name, v.name;
             '
             FROM sys.databases
@@ -970,6 +972,8 @@ class SQLServerConnector(BaseDatabaseConnector):
                 p.modify_date
             FROM sys.procedures p
             JOIN sys.schemas s ON s.schema_id = p.schema_id
+            WHERE s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
+              AND p.is_ms_shipped = 0
             ORDER BY s.name, p.name;
             '
             FROM sys.databases
@@ -996,6 +1000,8 @@ class SQLServerConnector(BaseDatabaseConnector):
             FROM sys.objects o
             JOIN sys.schemas s ON s.schema_id = o.schema_id
             WHERE o.type IN (''FN'', ''IF'', ''TF'')
+              AND s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
+              AND o.is_ms_shipped = 0
             ORDER BY s.name, o.name;
             '
             FROM sys.databases
@@ -1022,6 +1028,8 @@ class SQLServerConnector(BaseDatabaseConnector):
             JOIN sys.tables t ON t.object_id = tr.parent_id
             JOIN sys.schemas s ON s.schema_id = t.schema_id
             WHERE tr.parent_class = 1
+              AND s.name NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
+              AND tr.is_ms_shipped = 0
             ORDER BY s.name, t.name, tr.name;
             '
             FROM sys.databases
@@ -1050,6 +1058,8 @@ class SQLServerConnector(BaseDatabaseConnector):
             LEFT JOIN sys.objects o ON o.object_id = d.referencing_id
             LEFT JOIN sys.objects ref_o ON ref_o.object_id = d.referenced_id
             WHERE d.referencing_id IS NOT NULL
+              AND COALESCE(o.is_ms_shipped, 0) = 0
+              AND OBJECT_SCHEMA_NAME(d.referencing_id) NOT IN (''sys'', ''INFORMATION_SCHEMA'', ''guest'')
             ORDER BY referencing_schema, referencing_object;
             '
             FROM sys.databases
@@ -1968,8 +1978,24 @@ class SQLServerConnector(BaseDatabaseConnector):
     def get_top_largest_tables(self) -> List[Dict[str, Any]]:
         """
         Retrieves Top 10 Largest Tables by Storage Size for Dashboard Chart.
-        Query uses sys.tables & sys.allocation_units.
+        Supports both instance-wide multi-database discovery and single database scopes.
         """
+        try:
+            largest = self.get_largest_tables()
+            if largest:
+                result = []
+                for r in largest[:10]:
+                    db = r.get("database_name")
+                    sch = r.get("schema_name")
+                    tbl = r.get("table_name", "Unknown")
+                    prefix = f"{db}." if db else (f"{sch}." if sch else "")
+                    name = f"{prefix}{tbl}"
+                    mb = r.get("reserved_mb", 0)
+                    result.append({"name": name, "size": f"{mb} MB"})
+                return result
+        except Exception:
+            pass
+
         query = """
             SELECT TOP 10
                 (s.name + '.' + t.name) AS table_name,

@@ -1230,11 +1230,11 @@ class DatabaseMetadataExplorer:
         rows = self.connector.get_top_100_largest_tables()
         formatted_rows = self._normalize_rows(
             rows,
-            ["schema_name", "table_name", "engine_name", "total_mb", "total_gb"]
+            ["schema_name", "table_name", "engine_name", "data_mb", "index_mb", "total_mb", "total_gb"]
         )
         return {
             "title": "5. Top 100 Largest Tables",
-            "headers": ["Database", "Table", "Engine", "Total Size (MB)", "Total Size (GB)"],
+            "headers": ["Database", "Table", "Engine", "Data Size (MB)", "Index Size (MB)", "Total Size (MB)", "Total Size (GB)"],
             "rows": formatted_rows,
             "note": "Top 100 largest tables ordered by total storage size.",
         }
@@ -1346,7 +1346,7 @@ class DatabaseMetadataExplorer:
             "title": "59. Identify Tables That Haven't Been Used",
             "headers": ["Database", "Table", "Reads", "Writes", "Total I/O Ops"],
             "rows": formatted_rows,
-            "note": "Tables with lowest read/write activity for obsolence assessment.",
+            "note": "Tables with zero recorded read and write operations (completely unused) for obsolescence assessment.",
         }
 
     def _get_mysql_hot_tables_data(self) -> Dict[str, Any]:
@@ -3995,10 +3995,10 @@ class DatabaseMetadataExplorer:
 
     def _get_oracle_largest_indexes_data(self) -> Dict[str, Any]:
         rows = self.connector.get_largest_indexes()
-        formatted_rows = self._normalize_rows(rows, ["schema_name", "index_name", "index_mb", "index_gb"])
+        formatted_rows = self._normalize_rows(rows, ["schema_name", "table_name", "index_name", "index_mb", "index_gb"])
         return {
             "title": "20. Largest Indexes",
-            "headers": ["Schema", "Index Name", "Index Size (MB)", "Index Size (GB)"],
+            "headers": ["Schema", "Table Name", "Index Name", "Index Size (MB)", "Index Size (GB)"],
             "rows": formatted_rows,
             "note": "Top 100 largest indexes by total segment size.",
         }
@@ -4678,24 +4678,69 @@ class DatabaseMetadataExplorer:
             db_data = self.connector.get_database_inventory_sizes()
         else:
             names = self.connector.get_database_names()
-            db_data = [{"schema_name": name, "total_size_bytes": 0} for name in names]
+            db_data = [
+                {
+                    "schema_name": name,
+                    "tables_count": 0,
+                    "data_bytes": 0,
+                    "index_bytes": 0,
+                    "total_size_bytes": 0,
+                }
+                for name in names
+            ]
 
         rows = []
+        total_tables = 0
+        total_data_bytes = 0
+        total_index_bytes = 0
         total_bytes = 0
 
         for item in db_data:
             schema_name = item.get("schema_name", "-")
+            tables = int(item.get("tables_count") or 0)
+            data_b = int(item.get("data_bytes") or 0)
+            idx_b = int(item.get("index_bytes") or 0)
             size_b = int(item.get("total_size_bytes") or 0)
-            total_bytes += size_b
-            formatted_size = self._format_size(size_b)
-            rows.append([schema_name, formatted_size])
 
-        total_formatted = self._format_size(total_bytes)
-        rows.append(["TOTAL", total_formatted])
+            total_tables += tables
+            total_data_bytes += data_b
+            total_index_bytes += idx_b
+            total_bytes += size_b
+
+            data_mb = round(data_b / (1024 * 1024), 2)
+            idx_mb = round(idx_b / (1024 * 1024), 2)
+            size_mb = round(size_b / (1024 * 1024), 2)
+            size_gb = round(size_b / (1024 * 1024 * 1024), 2)
+
+            rows.append([
+                schema_name,
+                tables,
+                f"{data_mb:.2f}",
+                f"{idx_mb:.2f}",
+                f"{size_mb:.2f}",
+                f"{size_gb:.2f}",
+            ])
+
+        total_row = [
+            "TOTAL",
+            total_tables,
+            f"{round(total_data_bytes / (1024 * 1024), 2):.2f}",
+            f"{round(total_index_bytes / (1024 * 1024), 2):.2f}",
+            f"{round(total_bytes / (1024 * 1024), 2):.2f}",
+            f"{round(total_bytes / (1024 * 1024 * 1024), 2):.2f}",
+        ]
+        rows.append(total_row)
 
         return {
             "title": f"2. Database/Schema Inventory ({len(db_data)} Databases)",
-            "headers": ["Database Schema", "DB Size"],
+            "headers": [
+                "Database Name",
+                "Tables",
+                "Data Size (MB)",
+                "Index Size (MB)",
+                "Total Size (MB)",
+                "Total Size (GB)",
+            ],
             "rows": rows,
             "note": "System schemas are excluded. Total DB size is aggregated at the bottom row.",
         }
